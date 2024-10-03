@@ -528,14 +528,14 @@ int morse_pager_sw_pagesets_init(struct morse *mors)
 		} else if ((pager->flags & MORSE_PAGER_FLAGS_DIR_TO_HOST) &&
 			   (pager->flags & MORSE_PAGER_FLAGS_FREE)) {
 			rx_return = pager;
-			/* Preload pages */
-			set_bit(MORSE_PAGE_RETURN_PEND, &mors->chip_if->event_flags);
 		} else if ((pager->flags & MORSE_PAGER_FLAGS_DIR_TO_CHIP) &&
 			   (pager->flags & MORSE_PAGER_FLAGS_POPULATED)) {
 			tx_data = pager;
 		} else if ((pager->flags & MORSE_PAGER_FLAGS_DIR_TO_CHIP) &&
 			   (pager->flags & MORSE_PAGER_FLAGS_FREE)) {
 			tx_return = pager;
+			/* Preload pages */
+			set_bit(MORSE_PAGE_RETURN_PEND, &mors->chip_if->event_flags);
 		} else {
 			MORSE_ERR(mors, "%s Invalid pager flags [0x%x]\n", __func__, pager->flags);
 		}

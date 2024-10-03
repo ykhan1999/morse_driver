@@ -54,10 +54,10 @@
 /**
  * Number of CHIP->HOST returned pages to cache in the host to speed up TX
  *
- * Nominally, this should be equal to the amount of pages allocated to the
+ * Nominally, this should be >= the amount of pages allocated to the
  * FROM_HOST pager
  */
-#define CACHED_PAGES_MAX		23
+#define CACHED_PAGES_MAX		32
 /** Must be power ^2 and >= CACHED_PAGES_MAX */
 #define CACHED_PAGES_KFIFO_LEN	32
 
@@ -98,8 +98,8 @@ struct morse_pageset {
 	struct morse_pager *populated_pager;
 	struct morse_pager *return_pager;
 
-	 DECLARE_KFIFO(reserved_pages, struct morse_page, CMD_RSVED_KFIFO_LEN);
-	 DECLARE_KFIFO(cached_pages, struct morse_page, CACHED_PAGES_KFIFO_LEN);
+	DECLARE_KFIFO(reserved_pages, struct morse_page, CMD_RSVED_KFIFO_LEN);
+	DECLARE_KFIFO(cached_pages, struct morse_page, CACHED_PAGES_KFIFO_LEN);
 };
 
 /**

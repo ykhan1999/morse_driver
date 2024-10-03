@@ -138,6 +138,9 @@ enum morse_rx_status_flags {
  *                             (i.e. command response or tx status)
  * @MORSE_SKB_CHAN_BEACON: Payload is a beacon
  * @MORSE_SKB_CHAN_MGMT: Payload is a management frame
+ * @MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON: Internal channel for timing critical
+ * beacons. These frames will be sent to the chip first, and will be sent on
+ * MORSE_SKB_CHAN_BEACON target.
  * @MORSE_SKB_CHAN_LOOPBACK: Payload should be looped back untouched
  * @MORSE_SKB_CHAN_COMMAND: Payload is a command
  * @MORSE_SKB_CHAN_TX_STATUS: Payload is TX status (from chip only)
@@ -149,6 +152,7 @@ enum morse_skb_channel {
 	MORSE_SKB_CHAN_BEACON = 0x3,
 	MORSE_SKB_CHAN_MGMT = 0x4,
 	MORSE_SKB_CHAN_WIPHY = 0x5,
+	MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON = 0x80,
 	MORSE_SKB_CHAN_LOOPBACK = 0xEE,
 	MORSE_SKB_CHAN_COMMAND = 0xFE,
 	MORSE_SKB_CHAN_TX_STATUS = 0xFF
@@ -279,7 +283,7 @@ struct morse_skb_rx_status {
  * @sync: synchronization byte for verification
  * @channel: flags for the skb. Mapping from enum morse_skb_channel
  * @len: length of data section
- * @tail: padding from end of skb header to start of data, so skb can be aligned on the host
+ * @offset: padding from end of skb header to start of data, so skb can be aligned on the host
  * @tx_info: TX information
  * @tx_status: TX status feedback
  * @rx_status: RX status feedback
@@ -288,7 +292,7 @@ struct morse_buff_skb_header {
 	u8 sync;
 	u8 channel;
 	__le16 len;
-	u8 tail;
+	u8 offset;
 	u8 checksum_lower;
 	__le16 checksum_upper;
 	union {

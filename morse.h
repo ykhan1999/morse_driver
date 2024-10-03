@@ -25,6 +25,7 @@
 #include <linux/kfifo.h>
 #include <linux/types.h>
 #include <linux/version.h>
+#include <linux/crc32.h>
 #if KERNEL_VERSION(4, 9, 81) < LINUX_VERSION_CODE
 #include <linux/nospec.h>
 #endif
@@ -40,12 +41,14 @@
 #include "raw.h"
 #include "chip_if.h"
 #include "operations.h"
+#include "hw_scan.h"
 #include "utils.h"
 #ifdef CONFIG_MORSE_RC
 #include "rc.h"
 #endif
 #include "cac.h"
 #include "pv1.h"
+#include "coredump.h"
 
 #ifdef CONFIG_MORSE_USER_ACCESS
 #include "uaccess.h"
@@ -114,6 +117,7 @@
 
 #define QDBM_TO_MBM(gain) (((gain) * 100) >> 2)
 #define MBM_TO_QDBM(gain) (((gain) << 2) / 100)
+#define QDBM_TO_DBM(gain) ((gain) / 4)
 
 #define BPS_TO_KBPS(x) ((x) / 1000)
 
@@ -125,6 +129,7 @@
  * @MORSE_CONFIG_TEST_MODE_GET_HOST_TBL_PTR_ONLY: get host ptr only (no download or verification)
  * @MORSE_CONFIG_TEST_MODE_RESET: reset only (no download or verification)
  * @MORSE_CONFIG_TEST_MODE_BUS: write/read block via the bus
+ * @MORSE_CONFIG_TEST_MODE_BUS_PROFILE: measure time to perform bus operations
  */
 enum morse_config_test_mode {
 	MORSE_CONFIG_TEST_MODE_DISABLED,
@@ -133,6 +138,7 @@ enum morse_config_test_mode {
 	MORSE_CONFIG_TEST_MODE_GET_HOST_TBL_PTR_ONLY,
 	MORSE_CONFIG_TEST_MODE_RESET,
 	MORSE_CONFIG_TEST_MODE_BUS,
+	MORSE_CONFIG_TEST_MODE_BUS_PROFILE,
 
 	/* Add more test modes before this line */
 	MORSE_CONFIG_TEST_MODE_INVALID,
@@ -379,6 +385,33 @@ struct morse_ap {
 	DECLARE_BITMAP(aid_bitmap, MORSE_AP_AID_BITMAP_SIZE);
 };
 
+struct morse_mbca_config {
+	/**
+	 * Configuration to enable or disable MBCA TBTT selection and adjustment.
+	 */
+	u8 config;
+	/**
+	 * Interval at which beacon timing elements are included in beacons.
+	 */
+	u8 beacon_timing_report_interval;
+	/**
+	 * To keep track number of beacons sent for beacon timing report interval.
+	 */
+	u8 beacon_count;
+	/**
+	 * Minimum gap between our beacons and neighbor beacons for TBTT Selection.
+	 */
+	u8 min_beacon_gap_ms;
+	/**
+	 * Initial scan to find peers in the MBSS
+	 */
+	u16 mbss_start_scan_duration_ms;
+	/**
+	 * TBTT adjustment timer interval in target LMAC firmware.
+	 */
+	u16 tbtt_adj_interval_ms;
+};
+
 /** Mesh specific information */
 struct morse_mesh {
 	/** back pointer */
@@ -409,37 +442,39 @@ struct morse_mesh {
 	u32 kickout_ts;
 
 	/* Mesh Beacon Collision Avoidance state */
-	struct {
-		/**
-		 * Configuration to enable or disable MBCA TBTT selection and adjustment.
-		 */
-		u8 config;
+	struct morse_mbca_config mbca;
+};
 
-		/**
-		 * Interval at which beacon timing elements are included in beacons.
-		 */
-		u8 beacon_timing_report_interval;
+struct morse_mesh_config {
+	/** Length of the Mesh ID */
+	u8 mesh_id_len;
 
-		/**
-		 * To keep track number of beacons sent for beacon timing report interval.
-		 */
-		u8 beacon_count;
+	/** Mesh ID of the network */
+	char mesh_id[IEEE80211_MAX_SSID_LEN];
 
-		/**
-		 * Initial scan to find peers in the MBSS
-		 */
-		u16 mbss_start_scan_duration_ms;
+	/** Mode of mesh beaconless operation */
+	u8 mesh_beaconless_mode;
 
-		/**
-		 * Minimum gap between our beacons and neighbor beacons for TBTT Selection.
-		 */
-		u8 min_beacon_gap_ms;
+	/** Maximum number of peer links */
+	u8 max_plinks;
+} __packed;
 
-		/**
-		 * TBTT adjustment timer interval in target LMAC firmware.
-		 */
-		u16 tbtt_adj_interval_ms;
-	} mbca;
+struct morse_mesh_config_list {
+	struct list_head list;
+	/** VIF mac address */
+	u8 addr[ETH_ALEN];
+	/** dynamic peering mode */
+	bool dynamic_peering;
+	/** RSSI margin to consider while selecting a peer to kick out */
+	u8 rssi_margin;
+	/** Duration in seconds, a blacklisted peer is not allowed peering */
+	u32 blacklist_timeout;
+	/** Mesh specific information */
+	struct morse_mesh_config mesh_conf;
+	/** Mesh Beacon Collision Avoidance state */
+	struct morse_mbca_config mbca;
+	/** Protect Mesh config updates */
+	spinlock_t lock;
 };
 
 
@@ -681,6 +716,11 @@ struct morse_vif {
 	 */
 	bool beaconing_enabled;
 
+	/**
+	 * The bandwidth of the last received probe request
+	 */
+	u8 last_probe_req_bw_mhz;
+
 };
 
 struct morse_debug {
@@ -774,7 +814,6 @@ struct morse_watchdog {
 	struct hrtimer timer;
 	int interval_secs;
 	watchdog_callback_t ping;
-	watchdog_callback_t reset;
 	int consumers;
 	/* Serialise use of watchdog functions */
 	struct mutex lock;
@@ -798,6 +837,8 @@ struct mcast_filter {
 
 /** State flags for managing state of mors object */
 enum morse_state_flags {
+	/** Morse chip is unresponsive */
+	MORSE_STATE_FLAG_CHIP_UNRESPONSIVE,
 	/** Pushing/Pulling from the mac80211 DATA Qs have been stopped */
 	MORSE_STATE_FLAG_DATA_QS_STOPPED,
 	/** Sending TX data to the chip has been stopped */
@@ -847,6 +888,11 @@ struct morse {
 
 	/* wiphy device registered with cfg80211 */
 	struct wiphy *wiphy;
+
+	/* Extra padding to insert at the start of each tx packet */
+	u8 extra_tx_offset;
+
+	struct morse_hw_scan hw_scan;
 
 	struct morse_channel_survey *channel_survey;
 
@@ -912,6 +958,9 @@ struct morse {
 	bool config_ps;
 	struct morse_ps ps;
 
+	/** Mesh config list stored locally */
+	struct morse_mesh_config_list mesh_config;
+
 	/* U-APSD status per Access Category (bitfield) */
 	u8 uapsd_per_ac;
 
@@ -920,6 +969,8 @@ struct morse {
 	s32 tx_max_power_mbm;
 
 	bool enable_mbssid_ie;
+	/* Hardware scan is enabled/disabled */
+	bool enable_hw_scan;
 #ifdef CONFIG_MORSE_RC
 	struct morse_rc mrc;
 	int rts_threshold;
@@ -963,6 +1014,17 @@ struct morse {
 
 	/** Current Duty Cycle in 100ths of a percent. E.g. 10000 = 100% */
 	u32 duty_cycle;
+
+	struct {
+		/* read from the FW at runtime, used for coredump metadata filling */
+		const char *fw_ver_str;
+		/* firmware binary name, used for coredump metadata filling */
+		const char *fw_binary_str;
+		/* coredump crash info */
+		struct morse_coredump_data crash;
+		/* lock for accessing / modifying crash data */
+		struct mutex lock;
+	} coredump;
 
 	/* must be last */
 	u8 drv_priv[] __aligned(sizeof(void *));
@@ -1052,6 +1114,32 @@ static inline bool morse_test_mode_is_interactive(uint test_mode)
 	return false;
 }
 
+/**
+ * @brief Get CSSID from SSID/MESH ID and its length
+ *
+ * @param ssid SSID/MESH ID pointer
+ * @param len Length of SSID/MESH ID
+ *
+ * @returns Derived CSSID
+ */
+static inline u32 morse_generate_cssid(const u8 *ssid, u8 len)
+{
+	return ~crc32(~0, ssid, len);
+}
+
+/**
+ * mac2uint64 - Convert a MAC address to an integer
+ *
+ * @bssid: MAC address
+ *
+ * @return An unsigned integer representing the MAC address
+ */
+static inline u64 mac2uint64(const u8 *bssid)
+{
+	return ((u64)(bssid[0]) << 40) | ((u64)(bssid[1]) << 32) | ((u64)(bssid[2]) << 24) |
+	       ((u64)(bssid[3]) << 16) | ((u64)(bssid[4]) << 8) | ((u64)(bssid[5]));
+}
+
 int morse_beacon_init(struct morse_vif *mors_vif);
 void morse_beacon_finish(struct morse_vif *mors_vif);
 void morse_beacon_irq_handle(struct morse *mors, u32 status);
@@ -1112,5 +1200,7 @@ void morse_mac_schedule_probe_req(struct ieee80211_vif *vif);
  */
 bool morse_mac_is_s1g_long_beacon(struct morse *mors, struct sk_buff *skb);
 
+int morse_survey_add_channel_usage(struct morse *mors, struct morse_survey_rx_usage_record *record);
+int morse_survey_init_usage_records(struct morse *mors);
 
 #endif	/* !_MORSE_MORSE_H_ */

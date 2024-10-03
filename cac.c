@@ -204,11 +204,7 @@ int morse_cac_deinit(struct morse_vif *mors_vif)
 	if (!mors_vif->ap)
 		return 0;
 
-	spin_lock_bh(&cac->lock);
-
 	del_timer_sync(&cac->timer);
-
-	spin_unlock_bh(&cac->lock);
 
 	return 0;
 }

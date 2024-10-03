@@ -234,10 +234,15 @@ static int morse_cmd_send_wake_action_frame(struct morse *mors, struct morse_cmd
  */
 static int morse_cmd_coredump(struct morse *mors)
 {
+	int ret;
 	unsigned long rem;
 	/* A core dump typically takes ~30s, applying a x2 buffer for completion */
 	const int timeout_ms = 60000;
 	DECLARE_COMPLETION_ONSTACK(user_coredump_comp);
+
+	ret = morse_coredump_new(mors, MORSE_COREDUMP_REASON_USER_REQUEST);
+	if (ret)
+		return ret;
 
 	mors->user_coredump_comp = &user_coredump_comp;
 	set_bit(MORSE_STATE_FLAG_DO_COREDUMP, &mors->state_flags);
@@ -384,7 +389,7 @@ static int morse_cmd_drv(struct morse *mors, struct ieee80211_vif *vif,
 		    (struct morse_cmd_set_duty_cycle_req *)cmd;
 		mors->custom_configs.duty_cycle = req->duty_cycle;
 		/*
-		 * When a disable duty cycle command is executed via morsectrl it send a
+		 * When a disable duty cycle command is executed via morsectrl it sends a
 		 * duty cycle value of 100%. When this happens set the duty cycle value in
 		 * custom config as 0. This enables the driver to use the duty cycle value
 		 * mentioned in the regdom.
@@ -394,7 +399,7 @@ static int morse_cmd_drv(struct morse *mors, struct ieee80211_vif *vif,
 		mors->duty_cycle = req->duty_cycle;
 
 		cmd->hdr.message_id = MORSE_COMMAND_SET_DUTY_CYCLE;
-		ret = morse_cmd_tx(mors, resp, cmd, resp->hdr.len, cmd->hdr.vif_id, __func__);
+		ret = morse_cmd_tx(mors, resp, cmd, resp->hdr.len, 0, __func__);
 		resp->hdr.len = 4;
 		resp->status = ret;
 		break;
@@ -470,7 +475,8 @@ static int morse_cmd_drv(struct morse *mors, struct ieee80211_vif *vif,
 		resp->status = ret;
 		break;
 	case MORSE_COMMAND_SET_MESH_CONFIG:
-		ret = morse_cmd_set_mesh_config(mors_vif, (struct morse_cmd_mesh_config *)cmd);
+		ret = morse_cmd_set_mesh_config(mors_vif, (struct morse_cmd_mesh_config *)cmd,
+						NULL);
 		resp->hdr.len = 4;
 		resp->status = ret;
 		break;
@@ -508,12 +514,12 @@ int morse_cmd_resp_process(struct morse *mors, struct sk_buff *skb)
 
 	MORSE_DBG(mors, "EVT 0x%04x:0x%04x\n", resp_message_id, resp_host_id);
 
-	mutex_lock(&mors->cmd_lock);
-
 	if (!MORSE_CMD_IS_CFM(src_resp)) {
 		ret = morse_mac_event_recv(mors, skb);
-		goto exit;
+		goto exit_free;
 	}
+
+	mutex_lock(&mors->cmd_lock);
 
 	cmd_skb = morse_skbq_tx_pending(cmd_q);
 	if (cmd_skb) {
@@ -566,7 +572,7 @@ exit:
 	}
 
 	mutex_unlock(&mors->cmd_lock);
-
+exit_free:
 	dev_kfree_skb(skb);
 
 	return 0;
@@ -907,6 +913,9 @@ int morse_cmd_get_version(struct morse *mors)
 			mors->sw_ver.minor = minor;
 			mors->sw_ver.patch = patch;
 		}
+
+		/* Keep the firmware version string for coredump creation */
+		morse_coredump_set_fw_version_str(mors, resp->version);
 	}
 
 	kfree(resp);
@@ -1059,6 +1068,45 @@ static int morse_cmd_vendor_set_channel(struct morse *mors,
 	return 0;
 }
 
+static int morse_cmd_vendor_standby(struct morse *mors,
+				struct morse_resp_vendor *resp,
+				const struct morse_cmd_vendor *cmd)
+{
+	int ret;
+	struct morse_cmd_standby_mode_req *standby_mode =
+		(struct morse_cmd_standby_mode_req *)cmd;
+
+	if (standby_mode->cmd == STANDBY_MODE_CMD_ENTER) {
+		/* Validate hw scan config prior to entering standby */
+		if (hw_scan_is_supported(mors)) {
+			if (!mors->hw_scan.params)
+				return -EINVAL;
+			else if (!hw_scan_is_idle(mors))
+				return -EBUSY;
+			else if (!morse_mac_is_sta_vif_associated(mors->hw_scan.params->vif) &&
+				 !hw_scan_saved_config_has_ssid(mors))
+				return -EINVAL;
+
+			ret = morse_cmd_hw_scan(mors, mors->hw_scan.params, true);
+
+			if (ret)
+				goto exit;
+		}
+
+		morse_watchdog_pause(mors);
+	}
+
+	ret = morse_cmd_tx(mors, (struct morse_resp *)resp,
+			(struct morse_cmd *)cmd, sizeof(*resp), 0, __func__);
+
+	if ((ret && standby_mode->cmd == STANDBY_MODE_CMD_ENTER) ||
+			standby_mode->cmd == STANDBY_MODE_CMD_EXIT)
+		morse_watchdog_resume(mors);
+
+exit:
+	return ret;
+}
+
 int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
 		     const struct morse_cmd_vendor *cmd, int cmd_len,
 		     struct morse_resp_vendor *resp, int *resp_len)
@@ -1076,8 +1124,10 @@ int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
 			MORSE_ERR(mors, "%s error %d\n", __func__, ret);
 	} else if (cmd->hdr.message_id == MORSE_COMMAND_SET_CHANNEL) {
 		ret = morse_cmd_vendor_set_channel(mors,
-						   (struct morse_drv_resp_set_channel *)resp,
-						   (struct morse_drv_cmd_set_channel *)cmd);
+				(struct morse_drv_resp_set_channel *)resp,
+				(struct morse_drv_cmd_set_channel *)cmd);
+	} else if (cmd->hdr.message_id == MORSE_COMMAND_STANDBY_MODE) {
+		ret = morse_cmd_vendor_standby(mors, resp, cmd);
 	} else {
 		ret = morse_cmd_tx(mors, (struct morse_resp *)resp,
 				   (struct morse_cmd *)cmd, sizeof(*resp), 0, __func__);
@@ -1133,17 +1183,6 @@ int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
 			WARN_ON_ONCE(!mors_vif);
 			if (mors_vif && vif->type == NL80211_IFTYPE_AP)
 				morse_set_dtim_cts_to_self(cts_self_ps->enable, mors_vif);
-		}
-		break;
-	case MORSE_COMMAND_STANDBY_MODE:
-		{
-			struct morse_cmd_standby_mode_req *standby_mode =
-			    (struct morse_cmd_standby_mode_req *)cmd;
-
-			if (standby_mode->cmd == STANDBY_MODE_CMD_ENTER)
-				morse_watchdog_pause(mors);
-			else if (standby_mode->cmd == STANDBY_MODE_CMD_EXIT)
-				morse_watchdog_resume(mors);
 		}
 		break;
 	case MORSE_COMMAND_GET_SET_GENERIC_PARAM:
@@ -1584,6 +1623,49 @@ int morse_cmd_configure_page_slicing(struct morse_vif *mors_vif, bool enable)
 	cmd.enabled = enable;
 
 	ret = morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+
+	return ret;
+}
+
+int morse_cmd_hw_scan(struct morse *mors, struct morse_hw_scan_params *params, bool store)
+{
+	int ret;
+	struct morse_cmd_hw_scan_req *cmd;
+	size_t cmd_size;
+	u8 *buf;
+
+	cmd_size = morse_hw_scan_get_command_size(params);
+	cmd_size = ROUND_BYTES_TO_WORD(cmd_size);
+
+	cmd = kzalloc(cmd_size, GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
+
+	buf = cmd->variable;
+
+	if (store)
+		cmd->flags = MORSE_HW_SCAN_CMD_FLAGS_STORE;
+	else
+		cmd->flags |= params->start ?
+			MORSE_HW_SCAN_CMD_FLAGS_START : MORSE_HW_SCAN_CMD_FLAGS_ABORT;
+
+	if (params->survey)
+		cmd->flags |= MORSE_HW_SCAN_CMD_FLAGS_SURVEY;
+
+	if (params->use_1mhz_probes)
+		cmd->flags |= MORSE_HW_SCAN_CMD_FLAGS_1MHZ_PROBES;
+
+	cmd->flags = cpu_to_le32(cmd->flags);
+
+	if (params->start) {
+		cmd->dwell_time_ms = cpu_to_le32(params->dwell_time_ms);
+		buf = morse_hw_scan_insert_tlvs(params, buf);
+	}
+
+	morse_cmd_init(mors, &cmd->hdr, MORSE_COMMAND_HW_SCAN, 0, buf - (u8 *)cmd);
+	morse_hw_scan_dump_scan_cmd(mors, cmd);
+	ret = morse_cmd_tx(mors, NULL, (struct morse_cmd *)cmd, 0, 0, __func__);
+	kfree(cmd);
 
 	return ret;
 }

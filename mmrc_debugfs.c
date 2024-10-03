@@ -118,7 +118,7 @@ static int stats_read(struct seq_file *file, void *data)
 			 "prob last_rty last_suc last_att  tot_suc  tot_att mpdu_suc mpdu_fail\n");
 		for (i = 0; i < caps_size; i++) {
 			ratei = get_rate_row(tb, i);
-			if (!validate_rate(&ratei) || i != ratei.index)
+			if (!validate_rate(tb, &ratei) || i != ratei.index)
 				continue;
 
 			rate_stats = &tb->table[ratei.index];
@@ -212,7 +212,7 @@ static int stats_csv_read(struct seq_file *file, void *data)
 
 		for (i = 0; i < caps_size; i++) {
 			ratei = get_rate_row(tb, i);
-			if (!validate_rate(&ratei) || i != ratei.index)
+			if (!validate_rate(tb, &ratei) || i != ratei.index)
 				continue;
 
 			rate_stats = &tb->table[ratei.index];

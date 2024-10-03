@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2022 Morse Micro
+ * Copyright 2017-2024 Morse Micro
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -15,90 +15,92 @@
  * along with this program; if not, see
  * <https://www.gnu.org/licenses/>.
  */
-
-#ifndef _MORSE_WATCHDOG_H_
-#define _MORSE_WATCHDOG_H_
+#pragma once
 
 #include "morse.h"
 
 typedef int (*watchdog_callback_t)(struct morse *);
 
 /**
- * @brief Initialize a watchdog timer
+ * morse_watchdog_init() - Initialize the driver's watchdog timer
  *
- * @param mors The global morse config object
- * @param interval_ms The parameter holds the timeout interval in seconds
- * @param ping The pointer to ping callback function
- * @param reset The pointer to reset callback function
- * @return int 0 if success, -error otherwise
+ * @mors: The global morse config object
+ * @interval_s: The parameter holds the timeout interval in seconds
+ * @ping: The pointer to ping callback function
+ *
+ * Return 0 if success else error code
  */
-int morse_watchdog_init(struct morse *mors, int interval_ms,
-			watchdog_callback_t ping, watchdog_callback_t reset);
+int morse_watchdog_init(struct morse *mors, int interval_s,
+	watchdog_callback_t ping);
 
 /**
- * @brief Cancel an active watchdog timer and
- *        release allocated memory.
+ * morse_watchdog_cleanup() - Cancel an active watchdog timer and
+ *                            release allocated memory.
+ * @mors: The global morse config object
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * Return 0 if success else error code
  */
 int morse_watchdog_cleanup(struct morse *mors);
 
 /**
- * @brief Start a watchdog timer
+ * morse_watchdog_start() - Start the watchdog timer
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * @mors: The global morse config object
+ *
+ * Return 0 if success else error code
  */
 int morse_watchdog_start(struct morse *mors);
 
 /**
- * @brief Stop an active watchdog timer
+ * morse_watchdog_stop() - Stop an active watchdog timer
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * @mors: The global morse config object
+ *
+ * Return 0 if success else error code
  */
 int morse_watchdog_stop(struct morse *mors);
 
 /**
- * @brief Restart a watchdog timer expiry (now + interval)
+ * morse_watchdog_refresh() - Restart a watchdog timer expiry (now + interval)
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * @mors: The global morse config object
+ *
+ * Return 0 if success else error code
  */
 int morse_watchdog_refresh(struct morse *mors);
 
 /**
- * @brief Temporarily pause the watchdog.
+ * morse_watchdog_pause() - Temporarily pause the watchdog.
+ *
+ * @mors: The global morse config object
  *
  * This will suspend the watchdog timer until morse_watchdog_resume()
  * is invoked. There will be no further watchdog timeouts until the
  * watchdog is resumed. If the watchdog is stopped and restarted while
  * paused, it will still remain paused until resumed.
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * Return 0 if success else error code
  */
 int morse_watchdog_pause(struct morse *mors);
 
 /**
- * @brief Resume the watchdog, if it was paused.
+ * morse_watchdog_resume() - Resume the watchdog, if it was paused.
+ *
+ * @mors: The global morse config object
  *
  * This will resume operation of the watchdog timer following
  * morse_watchdog_pause(). The watchdog timer will be scheduled
  * for (now + interval).
  *
- * @param mors The global morse config object
- * @return int 0 if success, -error otherwise
+ * Return 0 if success else error code
  */
 int morse_watchdog_resume(struct morse *mors);
 
 /**
- * @brief Return a watchdog timeout interval in seconds
+ * morse_watchdog_get_interval() - Return a watchdog timeout interval in seconds
  *
- * @param mors The global morse config object
- * @return int interval > 0, -error otherwise
+ * @mors: The global morse config object
+ *
+ * Return interval (if greater than 0) else error code
  */
 int morse_watchdog_get_interval(struct morse *mors);
-
-#endif /* !_MORSE_WATCHDOG_H_ */

@@ -23,6 +23,7 @@
 #include <linux/delay.h>
 #include <net/mac80211.h>
 #include <linux/elf.h>
+#include <linux/crc32.h>
 
 #include "morse.h"
 #include "bus.h"
@@ -30,6 +31,9 @@
 #include "firmware.h"
 #include "mac.h"
 #include "vendor.h"
+#include "coredump.h"
+
+#define MAX_FW_BIN_FILE_NAME_LEN 30
 
 struct fw_init_params {
 	bool download_fw;
@@ -55,6 +59,10 @@ MODULE_PARM_DESC(macaddr_suffix,
 int sdio_reset_time = CONFIG_MORSE_SDIO_RESET_TIME;
 module_param(sdio_reset_time, int, 0644);
 MODULE_PARM_DESC(sdio_reset_time, "Time to wait (in msec) after SDIO reset");
+
+static char fw_bin_file[MAX_FW_BIN_FILE_NAME_LEN];
+module_param_string(fw_bin_file, fw_bin_file, sizeof(fw_bin_file), 0644);
+MODULE_PARM_DESC(fw_bin_file, "Firmware binary filename to load");
 
 static int get_file_header(const u8 *data, morse_elf_ehdr *ehdr)
 {
@@ -87,14 +95,19 @@ static void morse_parse_firmware_info(struct morse *mors, const u8 *data, int le
 {
 	const struct morse_fw_info_tlv *tlv = (const struct morse_fw_info_tlv *)data;
 
+	/* Reset the coredump memory descriptor information */
+	morse_coredump_remove_memory_regions(mors);
+
 	while ((u8 *)tlv < (data + length)) {
 		switch (le16_to_cpu(tlv->type)) {
 		case MORSE_FW_INFO_TLV_BCF_ADDR:
-			{
-				/* Put this in a get_unaligned just in case it's not aligned */
-				mors->bcf_address = le32_to_cpu(get_unaligned((u32 *)tlv->val));
-				break;
-			}
+			/* Put this in a get_unaligned just in case it's not aligned */
+			mors->bcf_address = le32_to_cpu(get_unaligned((u32 *)tlv->val));
+			break;
+		case MORSE_FW_INFO_TLV_COREDUMP_MEM_REGION:
+			morse_coredump_add_memory_region(mors,
+				(struct morse_fw_info_tlv_coredump_mem *)tlv->val);
+			break;
 		default:
 			/* Just skip unknown types */
 			break;
@@ -738,15 +751,10 @@ exit:
 /* Caller must kfree() the returned value. */
 char *morse_firmware_build_fw_path(struct morse *mors)
 {
-	const char *fw_variant = "";
-
-	if (is_thin_lmac_mode())
-		fw_variant = MORSE_FW_THIN_LMAC_SUFFIX;
-	else if (is_virtual_sta_test_mode())
-		fw_variant = MORSE_FW_VIRTUAL_STA_SUFFIX;
-
-	return kasprintf(GFP_KERNEL,
-			 MORSE_FW_DIR "/%s%s" MORSE_FW_EXT, mors->cfg->fw_base, fw_variant);
+	if (fw_bin_file[0] == '\0')
+		return mors->cfg->get_fw_path(mors->chip_id);
+	else
+		return kasprintf(GFP_KERNEL, MORSE_FW_DIR "/%s", fw_bin_file);
 }
 
 static int morse_firmware_get_init_params(uint test_mode, struct fw_init_params *init_params)
@@ -786,6 +794,11 @@ static int morse_firmware_get_init_params(uint test_mode, struct fw_init_params 
 		get_host_table_ptr = false;
 		verify_fw = false;
 		break;
+	case MORSE_CONFIG_TEST_MODE_BUS_PROFILE:
+		download_fw = false;
+		get_host_table_ptr = false;
+		verify_fw = false;
+		break;
 	default:
 		/* Not a valid case */
 		return -EINVAL;
@@ -812,18 +825,16 @@ static int morse_firmware_init_preloaded(struct morse *mors,
 		goto exit;
 
 	while (retries--) {
+		if (!mors->chip_was_reset) {
+			ret = morse_firmware_reset(mors);
+		} else {
+			MORSE_WARN(mors, "%s: Chip was already reset", __func__);
+			ret = 0;
+		}
 
-			if (!mors->chip_was_reset) {
-				ret = morse_firmware_reset(mors);
-			} else {
-				MORSE_WARN(mors, "%s: Chip was already reset", __func__);
-				ret = 0;
-			}
-
-			/* Perform pre load chip preparation */
-			if (mors->cfg->pre_load_prepare)
-				ret = ret ? ret : mors->cfg->pre_load_prepare(mors);
-
+		/* Perform pre load chip preparation */
+		if (mors->cfg->pre_load_prepare)
+			ret = ret ? ret : mors->cfg->pre_load_prepare(mors);
 
 		if (init_params.download_fw) {
 			ret = ret ? ret : morse_firmware_invalidate_host_ptr(mors);
@@ -850,6 +861,11 @@ exit:
 	return ret;
 }
 
+static uint32_t binary_crc(const struct firmware *fw)
+{
+	return ~crc32_le(~0, (unsigned char const *)fw->data, fw->size) & 0xffffffff;
+}
+
 int morse_firmware_init(struct morse *mors, enum morse_config_test_mode test_mode)
 {
 	int n;
@@ -868,7 +884,6 @@ int morse_firmware_init(struct morse *mors, enum morse_config_test_mode test_mod
 	/* Use filenames only - Android sets the path */
 	use_full_path = false;
 #endif
-
 
 	fw_path = morse_firmware_build_fw_path(mors);
 	if (!fw_path) {
@@ -925,26 +940,31 @@ int morse_firmware_init(struct morse *mors, enum morse_config_test_mode test_mod
 			bcf_name = p + 1;
 	}
 
-	/* Use dev_xx here to unconditionally print regardless of driver log level */
-	dev_info(mors->dev, "Loading firmware from %s\n", fw_name);
 	ret = request_firmware(&fw, fw_name, mors->dev);
 	if (ret != 0) {
 		if (ret == -ENOENT)
 			dev_err(mors->dev, "Firmware %s not found\n", fw_name);
 		goto exit;
 	}
-	dev_info(mors->dev, "Loading BCF from %s\n", bcf_name);
+	dev_info(mors->dev, "Loaded firmware from %s, size %zu, crc32 0x%08x\n",
+		fw_name, fw->size, binary_crc(fw));
+
 	ret = request_firmware(&bcf, bcf_name, mors->dev);
 	if (ret != 0) {
 		if (ret == -ENOENT)
-			dev_err(mors->dev, "BCF %s not found\n", fw_name);
+			dev_err(mors->dev, "BCF %s not found\n", bcf_name);
 		goto exit;
 	}
+	/* Calculate CRC to match the crc32 line command */
+	dev_info(mors->dev, "Loaded BCF from %s, size %zu, crc32 0x%08x\n",
+		bcf_name, bcf->size, binary_crc(bcf));
 	/* Clear out extra ACK timeout, its value is unknown */
 	mors->extra_ack_timeout_us = -1;
 
-	ret = morse_firmware_init_preloaded(mors, fw, bcf, test_mode);
+	/* store the fw binary string used into our coredump */
+	morse_coredump_set_fw_binary_str(mors, fw_name);
 
+	ret = morse_firmware_init_preloaded(mors, fw, bcf, test_mode);
 exit:
 	release_firmware(fw);
 	release_firmware(bcf);
@@ -962,6 +982,10 @@ exit:
 int morse_firmware_exec_ndr(struct morse *mors)
 {
 	int ret = 0;
+
+	morse_claim_bus(mors);
+	morse_firmware_clear_aon(mors);
+	morse_release_bus(mors);
 
 	ret = morse_firmware_reset(mors);
 

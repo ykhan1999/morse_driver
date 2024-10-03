@@ -124,13 +124,19 @@
 /* Last element to declare in valid_chip_ids[] */
 #define CHIP_ID_END		0xFFFFFFFF
 
+enum morse_coredump_method;
+
 enum host_table_firmware_flags {
 	/** Firmware supports S1G */
 	MORSE_FW_FLAGS_SUPPORT_S1G = BIT(0),
 	/** BUSY GPIO pin is active low */
 	MORSE_FW_FLAGS_BUSY_ACTIVE_LOW = BIT(1),
 	/** Firmware reports beacon tx completion status to host */
-	MORSE_FW_FLAGS_REPORTS_TX_BEACON_COMPLETION = BIT(2)
+	MORSE_FW_FLAGS_REPORTS_TX_BEACON_COMPLETION = BIT(2),
+	/** FW has HW scan support */
+	MORSE_FW_FLAGS_SUPPORT_HW_SCAN = BIT(3),
+	/** Supports hostsync chip halting */
+	MORSE_FW_FLAGS_SUPPORT_CHIP_HALT_IRQ = BIT(4),
 };
 
 struct host_table {
@@ -189,11 +195,6 @@ struct morse_hw_cfg {
 	 * Should not change for a family of chipset.
 	 */
 	const u32 chip_id_address;
-	/**
-	 * @fw_base: The initial part of the firmware filename.
-	 * For example, "mm6108" will become /lib/firmware/morse/mm6108.bin.
-	 */
-	const char *fw_base;
 
 	const struct morse_firmware *fw;
 	const struct chip_if_ops *ops;
@@ -211,6 +212,13 @@ struct morse_hw_cfg {
 	 * @chip_id: Registered chip ID when loading the driver
 	 */
 	 u8 (*get_ps_wakeup_delay_ms)(u32 chip_id);
+
+	/**
+	 * Get FW path depending on chip id
+	 *
+	 * @chip_id: Registered chip ID when loading the driver
+	 */
+	 char *(*get_fw_path)(u32 chip_id);
 
 	/**
 	 * Enable SDIO burst mode
@@ -248,6 +256,13 @@ struct morse_hw_cfg {
 	int (*get_encoded_country)(struct morse *mors);
 
 	/**
+	 * Invoke prior to initiating a coredump to prepare the chip
+	 *
+	 * @return error code
+	 */
+	int (*pre_coredump_hook)(struct morse *mors, enum morse_coredump_method method);
+
+	/**
 	 * @bus_double_read: Decide if the bus workaround is required to recover
 	 * the page header repeated words
 	 */
@@ -259,6 +274,11 @@ struct morse_hw_cfg {
 	 * this variable will get cleared to zero (no delay).
 	 */
 	unsigned int xtal_init_sdio_trans_delay_ms;
+
+	/**
+	 * @enable_short_bcn_as_dtim : Indicate if DTIM beacon should be a long beacon.
+	 */
+	bool enable_short_bcn_as_dtim;
 
 	/**
 	 * @mm_ps_gpios_supported: Indicate if a hardware config supports powersave

@@ -42,11 +42,6 @@
 /** Duration in seconds, a kicked out peer is blacklisted */
 #define DEFAULT_MESH_BLACKLIST_TIMEOUT 30
 
-#define MORSE_MESH_DBG(_m, _f, _a...)		morse_dbg(FEATURE_ID_MESH, _m, _f, ##_a)
-#define MORSE_MESH_INFO(_m, _f, _a...)		morse_info(FEATURE_ID_MESH, _m, _f, ##_a)
-#define MORSE_MESH_WARN(_m, _f, _a...)		morse_warn(FEATURE_ID_MESH, _m, _f, ##_a)
-#define MORSE_MESH_ERR(_m, _f, _a...)		morse_err(FEATURE_ID_MESH, _m, _f, ##_a)
-
 static void morse_schedule_mesh_probe_timer(struct morse_mesh *mesh, int delay)
 {
 	unsigned long timeout;
@@ -115,11 +110,98 @@ int morse_cmd_cfg_mesh_bss(struct morse_vif *mors_vif, bool stop_mesh)
 	return ret;
 }
 
-int morse_cmd_set_mesh_config(struct morse_vif *mors_vif, struct morse_cmd_mesh_config *mesh_config)
+/**
+ * morse_find_mesh_config - Find the mesh config for the VIF stored in the list
+ *
+ * @mors: Global morse sruct
+ * @addr: VIF address to find the config
+ *
+ * @return: Pointer to stored config, else NULL
+ */
+static struct morse_mesh_config_list *morse_find_mesh_config(struct morse *mors, u8 addr[ETH_ALEN])
+{
+	struct morse_mesh_config_list *config;
+
+	lockdep_assert_held(&mors->mesh_config.lock);
+	if (!addr)
+		return NULL;
+
+	list_for_each_entry(config, &mors->mesh_config.list, list) {
+		if (memcmp(config->addr, addr, ETH_ALEN) == 0)
+			return config;
+	}
+	return NULL;
+}
+
+int morse_restore_mesh_config(struct morse_vif *mors_vif)
+{
+	struct morse_mesh_config_list *config;
+	struct morse_mesh *mesh;
+	struct morse *mors;
+	struct ieee80211_vif *vif;
+
+	if (!mors_vif)
+		return -EFAULT;
+
+	vif = morse_vif_to_ieee80211_vif(mors_vif);
+	mesh = mors_vif->mesh;
+	mors = morse_vif_to_morse(mors_vif);
+
+	spin_lock_bh(&mors->mesh_config.lock);
+	config = morse_find_mesh_config(mors, vif->addr);
+	if (!config) {
+		spin_unlock_bh(&mors->mesh_config.lock);
+		return -ENOENT;
+	}
+
+	memcpy(&mesh->mbca, &config->mbca, sizeof(mesh->mbca));
+	spin_unlock_bh(&mors->mesh_config.lock);
+
+	if (morse_cmd_set_mesh_config(mors_vif, NULL, config))
+		return -EINVAL;
+
+	return 0;
+}
+
+static void morse_store_mesh_config(struct ieee80211_vif *vif, struct morse_mesh *mesh)
+{
+	struct morse_mesh_config_list *config;
+
+	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
+	struct morse *mors = morse_vif_to_morse(mors_vif);
+
+	spin_lock_bh(&mors->mesh_config.lock);
+	config = morse_find_mesh_config(mors, vif->addr);
+
+	if (!config) {
+		config = kzalloc(sizeof(*config), GFP_ATOMIC);
+		if (!config)
+			goto exit;
+		list_add(&config->list, &mors->mesh_config.list);
+	}
+
+	memcpy(&config->mbca, &mesh->mbca, sizeof(mesh->mbca));
+	memcpy(config->addr, vif->addr, ETH_ALEN);
+	memcpy(config->mesh_conf.mesh_id, mesh->mesh_id, mesh->mesh_id_len);
+	config->mesh_conf.mesh_id_len = mesh->mesh_id_len;
+	config->mesh_conf.mesh_beaconless_mode = mesh->mesh_beaconless_mode;
+	config->mesh_conf.max_plinks = mesh->max_plinks;
+	config->dynamic_peering = mesh->dynamic_peering;
+	config->rssi_margin = mesh->rssi_margin;
+	config->blacklist_timeout = mesh->blacklist_timeout;
+
+exit:
+	spin_unlock_bh(&mors->mesh_config.lock);
+}
+
+int morse_cmd_set_mesh_config(struct morse_vif *mors_vif,
+			      struct morse_cmd_mesh_config *mesh_config_cmd,
+			      struct morse_mesh_config_list *stored_config)
 {
 	struct ieee80211_vif *vif;
 	struct morse *mors;
 	struct morse_mesh *mesh;
+	struct morse_mesh_config *mesh_config;
 
 	if (!mors_vif)
 		return -EFAULT;
@@ -130,6 +212,12 @@ int morse_cmd_set_mesh_config(struct morse_vif *mors_vif, struct morse_cmd_mesh_
 
 	if (!ieee80211_vif_is_mesh(vif) || mesh->is_mesh_active)
 		return -ENOENT;
+
+	if (stored_config)
+		mesh_config = &stored_config->mesh_conf;
+	else
+		mesh_config = &mesh_config_cmd->cfg;
+
 	if (mesh_config->mesh_id_len > IEEE80211_MAX_SSID_LEN)
 		return -EINVAL;
 
@@ -144,6 +232,9 @@ int morse_cmd_set_mesh_config(struct morse_vif *mors_vif, struct morse_cmd_mesh_
 	if (mesh->mesh_beaconless_mode)
 		morse_schedule_mesh_probe_timer(mesh, 0);
 	mesh->is_mesh_active = true;
+
+	if (!stored_config)
+		morse_store_mesh_config(vif, mesh);
 
 	return 0;
 }
@@ -548,6 +639,19 @@ int morse_mac_process_mesh_rx_mgmt(struct morse_vif *mors_vif, struct sk_buff *s
 	return 0;
 }
 
+void morse_mac_clear_mesh_list(struct morse *mors)
+{
+	struct morse_mesh_config_list *config, *tmp;
+
+	spin_lock_bh(&mors->mesh_config.lock);
+	/* Free allocated list */
+	list_for_each_entry_safe(config, tmp, &mors->mesh_config.list, list) {
+		list_del(&config->list);
+		kfree(config);
+	}
+	spin_unlock_bh(&mors->mesh_config.lock);
+}
+
 int morse_mesh_deinit(struct morse_vif *mors_vif)
 {
 	struct morse_mesh *mesh = mors_vif->mesh;
@@ -556,6 +660,14 @@ int morse_mesh_deinit(struct morse_vif *mors_vif)
 	kfree(mors_vif->mesh);
 
 	return 0;
+}
+
+void morse_mesh_config_list_init(struct morse *mors)
+{
+	struct morse_mesh_config_list *mesh_config = &mors->mesh_config;
+
+	INIT_LIST_HEAD(&mesh_config->list);
+	spin_lock_init(&mesh_config->lock);
 }
 
 int morse_mesh_init(struct morse_vif *mors_vif)

@@ -57,6 +57,9 @@ enum morse_feature_id {
 	FEATURE_ID_CAC,
 	FEATURE_ID_SPI,
 	FEATURE_ID_MGMT_FRAMES,
+	FEATURE_ID_HWSCAN,
+	FEATURE_ID_COREDUMP,
+	FEATURE_ID_BEACON,
 
 	NUM_FEATURE_IDS
 };
@@ -67,7 +70,7 @@ enum morse_feature_id {
  */
 #define __generate_log_fn_prototype(fn)					\
 __printf(3, 4)								\
-void morse_ ## fn(u32 id, struct morse *mors, const char *fmt, ...)
+void morse_ ## fn(u32 id, const struct morse *mors, const char *fmt, ...)
 
 __generate_log_fn_prototype(dbg);
 __generate_log_fn_prototype(dbg_ratelimited);
@@ -185,8 +188,6 @@ enum morse_fw_hostif_log_channel_enable {
 
 void morse_debug_fw_hostif_log_record(struct morse *morse, int to_chip,
 				      struct sk_buff *skb, struct morse_buff_skb_header *hdr);
-
-int morse_coredump(struct morse *mors);
 
 const char *morse_iftype_to_str(enum nl80211_iftype type);
 

@@ -666,10 +666,6 @@ static void morse_dot11ah_probe_req_to_s1g(struct ieee80211_vif *vif,
 	if (ether_addr_equal_unaligned(probe_req->bssid, zero_mac))
 		eth_broadcast_addr(probe_req->bssid);
 
-	if (!ieee80211_vif_is_mesh(vif) && ies_mask->ies[WLAN_EID_SSID].ptr &&
-			ies_mask->ies[WLAN_EID_SSID].len > 0)
-		morse_dot11ah_store_cssid(ies_mask, 0, NULL, 0, NULL);
-
 	ht_cap = (const struct ieee80211_ht_cap *)ies_mask->ies[WLAN_EID_HT_CAPABILITY].ptr;
 	morse_dot11ah_mask_ies(ies_mask, false, false);
 	/* Enable ECSA */
@@ -913,13 +909,14 @@ static void morse_dot11ah_beacon_to_s1g(struct ieee80211_vif *vif,
 			 * for Infrastructure stations.
 			 */
 			if (!morse_is_mesh_network(ies_mask)) {
+				u32 cssid = morse_generate_cssid(ies_mask->ies[WLAN_EID_SSID].ptr,
+					ies_mask->ies[WLAN_EID_SSID].len);
+
 				/* Insert CSSID (as first entry in s1g_beacon->variable for short
 				 * beacon)
 				 */
-				*((u32 *)s1g_beacon_opt_fields) =
-					morse_dot11ah_store_cssid(ies_mask,
-								  beacon->u.beacon.capab_info,
-								  NULL, 0, NULL);
+				*((u32 *)s1g_beacon_opt_fields) = cssid;
+
 			} else {
 				*((u32 *)s1g_beacon_opt_fields) = 0;
 			}

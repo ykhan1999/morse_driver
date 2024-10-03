@@ -507,7 +507,7 @@ static void morse_sdio_clk_freq_switch(struct morse *mors, u64 sdio_clk_hz)
 	static const char *const envp[] = { "HOME=/", NULL };
 	char cmd[128];
 
-	char *const argv[] = { "/bin/bash", "-c", cmd, NULL };
+	char *const argv[] = { "/bin/sh", "-c", cmd, NULL };
 
 	if (strlen(sdio_clk_debugfs) <= MIN_STRLEN_SDIO_CLK_PATH) {
 		MORSE_SDIO_DBG(mors, "SDIO clock switching not supported, Skip.\n");
@@ -829,6 +829,11 @@ static int morse_sdio_probe(struct sdio_func *func, const struct sdio_device_id 
 #ifdef CONFIG_MORSE_ENABLE_TEST_MODES
 	if (test_mode == MORSE_CONFIG_TEST_MODE_BUS)
 		morse_bus_test(mors, "SDIO");
+
+	if (test_mode == MORSE_CONFIG_TEST_MODE_BUS_PROFILE) {
+		morse_bus_throughput_profiler(mors);
+		morse_sdio_disable_irq(sdio);
+	}
 #endif
 
 	/* Initialize PM runtime.

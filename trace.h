@@ -30,7 +30,7 @@
 #define MORSE_MSG_MAX 200
 
 DECLARE_EVENT_CLASS(morse_log_event,
-	TP_PROTO(struct morse *mors, struct va_format *vaf),
+	TP_PROTO(const struct morse *mors, struct va_format *vaf),
 	TP_ARGS(mors, vaf),
 	TP_STRUCT__entry(__string(device,
 			 dev_name(mors->dev))
@@ -45,35 +45,35 @@ DECLARE_EVENT_CLASS(morse_log_event,
 );
 
 DEFINE_EVENT(morse_log_event, morse_err,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_warn,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_info,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_dbg,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_err_ratelimited,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_warn_ratelimited,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_info_ratelimited,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 DEFINE_EVENT(morse_log_event, morse_dbg_ratelimited,
-	TP_PROTO(struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
+	TP_PROTO(const struct morse *mors, struct va_format *vaf), TP_ARGS(mors, vaf)
 );
 
 #endif

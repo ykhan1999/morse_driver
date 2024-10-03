@@ -148,31 +148,36 @@ static void morse_rc_sta_config_guard_per_bw(bool enable_sgi_rc,
 	const struct ieee80211_sta_ht_cap *ht_cap = morse_mac_sta_ht_cap(sta);
 	const struct ieee80211_sta_vht_cap *vht_cap = morse_mac_sta_vht_cap(sta);
 
+	caps->guard = MMRC_MASK(MMRC_GUARD_LONG);
+
+	if (!enable_sgi_rc)
+		return;
+
 	if (ht_cap->ht_supported) {
-		if (caps->bandwidth & MMRC_MASK(MMRC_BW_1MHZ)) {
-			caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_1MHZ, MMRC_GUARD_LONG);
-			if (enable_sgi_rc && (ht_cap->cap & IEEE80211_HT_CAP_SGI_20))
-				caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_1MHZ, MMRC_GUARD_SHORT);
+		if ((caps->bandwidth & MMRC_MASK(MMRC_BW_1MHZ)) &&
+				(ht_cap->cap & IEEE80211_HT_CAP_SGI_20)) {
+			caps->sgi_per_bw |= SGI_PER_BW(MMRC_BW_1MHZ);
+			caps->guard |= MMRC_MASK(MMRC_GUARD_SHORT);
 		}
 
-		if (caps->bandwidth & MMRC_MASK(MMRC_BW_2MHZ)) {
-			caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_2MHZ, MMRC_GUARD_LONG);
-			if (enable_sgi_rc && (ht_cap->cap & IEEE80211_HT_CAP_SGI_40))
-				caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_2MHZ, MMRC_GUARD_SHORT);
+		if ((caps->bandwidth & MMRC_MASK(MMRC_BW_2MHZ)) &&
+				(ht_cap->cap & IEEE80211_HT_CAP_SGI_40)) {
+			caps->sgi_per_bw |= SGI_PER_BW(MMRC_BW_2MHZ);
+			caps->guard |= MMRC_MASK(MMRC_GUARD_SHORT);
 		}
 	}
 
 	if (vht_cap->vht_supported) {
-		if (caps->bandwidth & MMRC_MASK(MMRC_BW_4MHZ)) {
-			caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_4MHZ, MMRC_GUARD_LONG);
-			if (enable_sgi_rc && (vht_cap->cap & IEEE80211_VHT_CAP_SHORT_GI_80))
-				caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_4MHZ, MMRC_GUARD_SHORT);
+		if ((caps->bandwidth & MMRC_MASK(MMRC_BW_4MHZ)) &&
+				(vht_cap->cap & IEEE80211_VHT_CAP_SHORT_GI_80)) {
+			caps->sgi_per_bw |= SGI_PER_BW(MMRC_BW_4MHZ);
+			caps->guard |= MMRC_MASK(MMRC_GUARD_SHORT);
 		}
 
-		if (caps->bandwidth & MMRC_MASK(MMRC_BW_8MHZ)) {
-			caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_8MHZ, MMRC_GUARD_LONG);
-			if (enable_sgi_rc && (vht_cap->cap & IEEE80211_VHT_CAP_SHORT_GI_160))
-				caps->guard_per_bw |= GUARD_PER_BW(MMRC_BW_8MHZ, MMRC_GUARD_SHORT);
+		if ((caps->bandwidth & MMRC_MASK(MMRC_BW_8MHZ)) &&
+				(vht_cap->cap & IEEE80211_VHT_CAP_SHORT_GI_160)) {
+			caps->sgi_per_bw |= SGI_PER_BW(MMRC_BW_8MHZ);
+			caps->guard |= MMRC_MASK(MMRC_GUARD_SHORT);
 		}
 	}
 }
@@ -308,11 +313,6 @@ int morse_rc_sta_add(struct morse *mors, struct ieee80211_vif *vif, struct ieee8
 	}
 
 	/* Configure STA for short and long guard */
-	if (mors->custom_configs.enable_sgi_rc)
-		caps.guard = MMRC_MASK(MMRC_GUARD_LONG) | MMRC_MASK(MMRC_GUARD_SHORT);
-	else
-		caps.guard = MMRC_MASK(MMRC_GUARD_LONG);
-
 	morse_rc_sta_config_guard_per_bw(mors->custom_configs.enable_sgi_rc, sta, &caps);
 
 	/* Set max rates */
@@ -335,7 +335,7 @@ int morse_rc_sta_add(struct morse *mors, struct ieee80211_vif *vif, struct ieee8
 	msta->rc.tb = kzalloc(table_mem_size, GFP_KERNEL);
 
 	/* Initialise the STA in MMRC */
-	mmrc_sta_init(msta->rc.tb, &caps);
+	mmrc_sta_init(msta->rc.tb, &caps, msta->avg_rssi);
 
 	/* Set last update time */
 	msta->rc.last_update = jiffies;
@@ -479,7 +479,7 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 {
 	int ret, i;
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
-	struct morse_sta *msta = (struct morse_sta *)sta->drv_priv;
+	struct morse_sta *msta;
 	struct mmrc_rate_table rates;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
 
@@ -492,9 +492,16 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 	morse_rc_sta_fill_basic_rates(mors, tx_info, tx_bw);
 
 	/* Use basic rates for non data packets */
-	if (!msta ||
-		(!ieee80211_is_data_qos(hdr->frame_control) &&
-			!morse_dot11ah_is_pv1_qos_data(hdr->frame_control)))
+	if (!sta || (!ieee80211_is_data_qos(hdr->frame_control) &&
+		     !morse_dot11ah_is_pv1_qos_data(hdr->frame_control)))
+		return;
+
+	msta = (struct morse_sta *)sta->drv_priv;
+	if (!msta)
+		return;
+
+	/* Use basic rates for initial EAPOL exchange when rate control has not yet converged */
+	if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE)))
 		return;
 
 	ret = morse_rc_sta_get_rates(mors, msta, &rates, skb->len);

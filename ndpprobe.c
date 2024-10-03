@@ -98,7 +98,7 @@ static void morse_ndp_probe_req_resp_tasklet(unsigned long data)
 	eth_broadcast_addr(&probe_resp->da[0]);
 
 	/* Convert the packet to s1g format */
-	if (morse_mac_pkt_to_s1g(mors, &skb, &tx_bw_mhz) < 0) {
+	if (morse_mac_pkt_to_s1g(mors, NULL, &skb, &tx_bw_mhz) < 0) {
 		MORSE_DBG(mors, "Failed to convert ndp probe resp.. dropping\n");
 		dev_kfree_skb_any(skb);
 		return;

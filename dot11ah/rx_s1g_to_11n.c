@@ -439,6 +439,34 @@ static u8 *morse_dot11_insert_ht_and_vht_ie(u8 *pos, struct ieee80211_rx_status 
 	return pos;
 }
 
+ /* Insert RSN and RSNX IE for the BSSID taken from CSSID list before
+  * forwarding beacon to mac80211
+  */
+static u8 *morse_dot11_insert_rsn_and_rsnx_ie(u8 *pos, struct dot11ah_update_rx_beacon_vals *vals,
+		const struct dot11ah_ies_mask *ies_mask)
+{
+	const u8 *rsn_ie = morse_dot11_find_ie(WLAN_EID_RSN, vals->cssid_ies, vals->cssid_ies_len);
+	const u8 *rsnx_ie = morse_dot11_find_ie(WLAN_EID_RSNX, vals->cssid_ies,
+						vals->cssid_ies_len);
+
+	if (!rsn_ie && !rsnx_ie)
+		return pos;
+
+	/* Insert RSN IE into beacon.
+	 * Pass the pointer to insert the IE excluding IE id and length.
+	 */
+	if (rsn_ie && !ies_mask->ies[WLAN_EID_RSN].ptr)
+		pos = morse_dot11_insert_ie(pos, rsn_ie + 2, WLAN_EID_RSN, *(rsn_ie + 1));
+
+	/* Insert RSNX IE into beacon.
+	 * Pass the pointer to insert the IE excluding IE id and length.
+	 */
+	if (rsnx_ie && !ies_mask->ies[WLAN_EID_RSNX].ptr)
+		pos = morse_dot11_insert_ie(pos, rsnx_ie + 2, WLAN_EID_RSNX, *(rsnx_ie + 1));
+
+	return pos;
+}
+
 static u8 *morse_dot11_insert_ssid_ie(u8 *pos, const struct dot11ah_ies_mask *ies_mask)
 {
 	if (ies_mask->ies[WLAN_EID_SSID].ptr)
@@ -598,8 +626,9 @@ static u8 *morse_dot11ah_insert_required_rx_ie(struct dot11ah_ies_mask *ies_mask
 
 static void
 morse_dot11ah_update_rx_beacon_elements(struct dot11ah_update_rx_beacon_vals *vals_to_update,
-					struct dot11ah_ies_mask *ies_mask)
+					struct dot11ah_ies_mask *ies_mask, u8 *bssid)
 {
+	struct morse_dot11ah_cssid_item *item = NULL;
 	struct dot11ah_s1g_bcn_compat_ie *s1g_bcn_comp = (struct dot11ah_s1g_bcn_compat_ie *)
 						ies_mask->ies[WLAN_EID_S1G_BCN_COMPAT].ptr;
 	struct dot11ah_short_beacon_ie *s1g_short_bcn = (struct dot11ah_short_beacon_ie *)
@@ -617,6 +646,24 @@ morse_dot11ah_update_rx_beacon_elements(struct dot11ah_update_rx_beacon_vals *va
 
 	vals_to_update->tim_ie = ies_mask->ies[WLAN_EID_TIM].ptr;
 	vals_to_update->tim_len = ies_mask->ies[WLAN_EID_TIM].len;
+
+	spin_lock_bh(&cssid_list_lock);
+
+	/* Try to find the CSSID item using source address and save a backup of IEs
+	 * presumably stored from previous probe response or beacon, before it gets
+	 * overwritten by IEs of incoming frame
+	 */
+	item = morse_dot11ah_find_bssid(bssid);
+
+	if (item && item->ies) {
+		vals_to_update->cssid_ies = kmalloc(item->ies_len, GFP_ATOMIC);
+
+		if (vals_to_update->cssid_ies) {
+			memcpy(vals_to_update->cssid_ies, item->ies, item->ies_len);
+			vals_to_update->cssid_ies_len = item->ies_len;
+		}
+	}
+	spin_unlock_bh(&cssid_list_lock);
 }
 
 static int morse_dot11ah_s1g_to_beacon_size(struct ieee80211_vif *vif, struct sk_buff *skb,
@@ -630,8 +677,9 @@ static int morse_dot11ah_s1g_to_beacon_size(struct ieee80211_vif *vif, struct sk
 	int beacon_len;
 	struct morse_dot11ah_cssid_item *item = NULL;
 	u8 *next_tbtt_ptr = NULL;
-	u8 *cssid_ptr = NULL;
 	u8 *ano_ptr = NULL;
+	const u8 *rsn_ie = NULL;
+	const u8 *rsnx_ie = NULL;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	u8 network_id_eid;
 	const bool include_ht_vht = true;
@@ -652,7 +700,6 @@ static int morse_dot11ah_s1g_to_beacon_size(struct ieee80211_vif *vif, struct sk
 	}
 
 	if (s1g_beacon->frame_control & IEEE80211_FC_COMPRESS_SSID)	{
-		cssid_ptr = s1g_ies;
 		s1g_ies += 4;
 		s1g_ies_len -= 4;
 	}
@@ -666,21 +713,16 @@ static int morse_dot11ah_s1g_to_beacon_size(struct ieee80211_vif *vif, struct sk
 	/* Mesh Beacons contains WLAN_EID_MESH_ID and wildcard SSID(length zero) IE.
 	 * Use mesh EID instead of ssid EID.
 	 */
-	if (morse_is_mesh_network(ies_mask)) {
-		network_id_eid = WLAN_EID_MESH_ID;
-		/* Do not use cssid ptr for mesh networks as cssid entry is stored with src addr */
-		cssid_ptr = NULL;
-	} else {
-		network_id_eid = WLAN_EID_SSID;
-	}
+	network_id_eid = morse_is_mesh_network(ies_mask) ? WLAN_EID_MESH_ID : WLAN_EID_SSID;
+
+	spin_lock_bh(&cssid_list_lock);
+	/* Try to find the CSSID item using source address */
+	item = morse_dot11ah_find_bssid(s1g_beacon->u.s1g_beacon.sa);
+
+	if (!item)
+		spin_unlock_bh(&cssid_list_lock);
 
 	if (!ies_mask->ies[network_id_eid].len) {
-		spin_lock_bh(&cssid_list_lock);
-		/* Try to find the SSID using source address */
-		item = morse_dot11ah_find_bssid(s1g_beacon->u.s1g_beacon.sa);
-		if (!item && cssid_ptr)
-			item = morse_dot11ah_find_cssid(*(u32 *)cssid_ptr);
-
 		if (item) {
 			/* parse received beacons for any missing IEs */
 			if (morse_dot11ah_parse_ies(item->ies, item->ies_len, ies_mask) < 0) {
@@ -690,22 +732,31 @@ static int morse_dot11ah_s1g_to_beacon_size(struct ieee80211_vif *vif, struct sk
 				goto exit;
 			}
 		} else {
-			spin_unlock_bh(&cssid_list_lock);
 			beacon_len = -EINVAL;
 			goto exit;
 		}
 	}
 
-	if (item)
+	if (!ies_mask->ies[network_id_eid].len && item)
 		beacon_len += item->ssid_len + 2;
 	else
 		beacon_len += sizeof(IEEE80211AH_UNKNOWN_SSID) + 2;
 
-	if (item && (s1g_beacon->frame_control & IEEE80211_STYPE_S1G_BEACON))
-		item->fc_bss_bw_subfield = IEEE80211AH_GET_FC_BSS_BW(s1g_beacon->frame_control);
-
 	beacon_len += morse_dot11_required_rx_ies_size(ies_mask,
 		include_ht_vht, include_ssid, include_mesh_id, check_wmm);
+
+	if (item) {
+		rsn_ie = morse_dot11_find_ie(WLAN_EID_RSN, item->ies, item->ies_len);
+		rsnx_ie = morse_dot11_find_ie(WLAN_EID_RSNX, item->ies, item->ies_len);
+
+		/* Total RSN IE length including element id and length */
+		if (rsn_ie)
+			beacon_len += *(rsn_ie + 1) + 2;
+
+		/* Total RSNX IE length including element id and length */
+		if (rsnx_ie)
+			beacon_len += *(rsnx_ie + 1) + 2;
+	}
 
 	/* Add size of secondary chan offset IE if ECSA IE is present & new op chan BW is 2MHz */
 	if (ies_mask->ies[WLAN_EID_EXT_CHANSWITCH_ANN].ptr && mors_vif->is_sta_assoc &&
@@ -909,13 +960,14 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 	bool frame_good = false;
 	u8 *pos = NULL;
 	u8 *next_tbtt_ptr = NULL;
-	u8 *cssid_ptr = NULL;
 	u8 *ano_ptr = NULL;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	u8 network_id_eid;
 	struct dot11ah_s1g_bcn_compat_ie *s1g_bcn_comp;
 	struct dot11ah_short_beacon_ie *s1g_short_bcn;
 
+	updated_vals.cssid_ies = NULL;
+	updated_vals.cssid_ies_len = 0;
 	updated_vals.capab_info = WLAN_CAPABILITY_ESS;
 	updated_vals.bcn_int = cpu_to_le16(100);
 
@@ -929,7 +981,6 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 	}
 
 	if (s1g_beacon->frame_control & IEEE80211_FC_COMPRESS_SSID) {
-		cssid_ptr = s1g_ies;
 		s1g_ies += 4;
 		s1g_ies_len -= 4;
 	}
@@ -944,14 +995,13 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 		network_id_eid = WLAN_EID_MESH_ID;
 		/* For mesh, both ESS and IBSS bits should be set to 0 */
 		updated_vals.capab_info = 0;
-		/* Do not use cssid ptr for mesh networks as cssid entry is stored with src addr */
-		cssid_ptr = NULL;
 	} else {
 		network_id_eid = WLAN_EID_SSID;
 	}
 
 	/* Update Capab info from original beacon*/
-	morse_dot11ah_update_rx_beacon_elements(&updated_vals, ies_mask);
+	morse_dot11ah_update_rx_beacon_elements(&updated_vals, ies_mask,
+						s1g_beacon->u.s1g_beacon.sa);
 
 	/* Allocate beacon before spinlock section */
 	beacon = kmalloc(beacon_len, GFP_KERNEL);
@@ -963,8 +1013,8 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 
 	/* Store SSID or restore it */
 	if (ies_mask->ies[network_id_eid].ptr) {
-		morse_dot11ah_store_cssid(ies_mask, updated_vals.capab_info,
-			s1g_ies, s1g_ies_len, s1g_beacon->u.s1g_beacon.sa);
+		morse_dot11ah_store_cssid(ies_mask, updated_vals.capab_info, s1g_ies, s1g_ies_len,
+					  s1g_beacon->u.s1g_beacon.sa);
 
 		/* Fill in fc_bss_bw_subfield here, otherwise it will be
 		 * always set to 255 when DTIM period is 1 (no short beacons)
@@ -978,12 +1028,12 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 			spin_unlock_bh(&cssid_list_lock);
 	} else {
 		spin_lock_bh(&cssid_list_lock);
-		/* Try to find the SSID using source address */
+		/* Try to find the CSSID item using source address */
 		item = morse_dot11ah_find_bssid(s1g_beacon->u.s1g_beacon.sa);
-		if (!item && cssid_ptr)
-			item = morse_dot11ah_find_cssid(*(u32 *)cssid_ptr);
 
 		if (item) {
+			item->fc_bss_bw_subfield =
+				IEEE80211AH_GET_FC_BSS_BW(s1g_beacon->frame_control);
 			/* Reparse for stored beacon */
 			if (morse_dot11ah_parse_ies(item->ies, item->ies_len, ies_mask) < 0) {
 				dot11ah_warn("Failed to parse stored beacon\n");
@@ -1051,6 +1101,7 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 	 */
 	ies_mask->ies[WLAN_EID_SSID].ptr = NULL;
 
+	pos = morse_dot11_insert_rsn_and_rsnx_ie(pos, &updated_vals, ies_mask);
 	pos = morse_dot11_insert_ht_and_vht_ie(pos, rxs, ies_mask);
 	pos = morse_dot11ah_insert_required_rx_ie(ies_mask, pos, false);
 
@@ -1070,6 +1121,9 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 exit:
 	if (item)
 		spin_unlock_bh(&cssid_list_lock);
+
+	/* Free the allocated IEs memory */
+	kfree(updated_vals.cssid_ies);
 
 	if (!frame_good)
 		skb_trim(skb, 0);
@@ -1210,8 +1264,8 @@ static void morse_dot11ah_s1g_to_probe_resp(struct ieee80211_vif *vif, struct sk
 	s1g_probe_resp->u.probe_resp.capab_info |= WLAN_CAPABILITY_SHORT_SLOT_TIME;
 
 	/* Create/Update the S1G IES for this cssid/bssid entry */
-	morse_dot11ah_store_cssid(ies_mask, s1g_probe_resp->u.probe_resp.capab_info,
-		s1g_ies, s1g_ies_len, s1g_probe_resp->bssid);
+	morse_dot11ah_store_cssid(ies_mask, s1g_probe_resp->u.probe_resp.capab_info, s1g_ies,
+				  s1g_ies_len, s1g_probe_resp->bssid);
 
 	probe_resp = kmalloc(length_11n, GFP_KERNEL);
 	if (!probe_resp)

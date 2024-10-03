@@ -423,6 +423,8 @@ void morse_page_slicing_init(struct ieee80211_vif *vif, u8 dtim_period, u8 enabl
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	struct page_slicing *page_slicing_data = &mors_vif->page_slicing_info;
 
+	memset(page_slicing_data, 0, sizeof(struct page_slicing));
+
 	/* Enable Page slicing only when dtim period > 1 */
 	if (dtim_period == 1)
 		page_slicing_data->enabled = false;
@@ -433,8 +435,12 @@ void morse_page_slicing_init(struct ieee80211_vif *vif, u8 dtim_period, u8 enabl
 	page_slicing_data->page_period = dtim_period;
 	/* Set page index to 0 as we are supporting upto 2007 STAs only (mac80211 limitation) */
 	page_slicing_data->page_index = 0;
-	/* Schedule a page in one DTIM interval */
-	page_slicing_data->page_slice_length = NUMBER_OF_BLOCKS_PER_PAGE / dtim_period;
+	/* Schedule a page in one DTIM interval. Check for dtim period value as it is
+	 * observed that mac80211 is passing invalid dtim period (zero) as part of beacon
+	 * interval configuration to driver in STA mode.
+	 */
+	if (dtim_period)
+		page_slicing_data->page_slice_length = NUMBER_OF_BLOCKS_PER_PAGE / dtim_period;
 	page_slicing_data->tim_virtual_map_len = 0;
 	page_slicing_data->page_slice_no = 0;
 }

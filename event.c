@@ -34,6 +34,22 @@
 #include "vendor.h"
 #include "ocs.h"
 #include "wiphy.h"
+#include "hw_scan.h"
+
+/** List of reason codes to use in the `command_connection_loss_evt` event */
+enum connection_loss_reason_code {
+	CONNECTION_LOSS_REASON_TSF_RESET = 0,
+};
+
+static const char *connection_loss_reason_to_str(enum connection_loss_reason_code reason)
+{
+	switch (reason) {
+	case CONNECTION_LOSS_REASON_TSF_RESET:
+		return "tsf reset";
+	default:
+		return "unknown";
+	}
+}
 
 int morse_mac_event_recv(struct morse *mors, struct sk_buff *skb)
 {
@@ -44,8 +60,6 @@ int morse_mac_event_recv(struct morse *mors, struct sk_buff *skb)
 	u16 event_iid = le16_to_cpu(event->hdr.host_id);
 	u16 event_len = le16_to_cpu(event->hdr.len);
 	u16 vif_id = le16_to_cpu(event->hdr.vif_id);
-
-	lockdep_assert_held(&mors->lock);
 
 	if (!MORSE_CMD_IS_EVT(event)) {
 		ret = -EINVAL;
@@ -143,6 +157,47 @@ int morse_mac_event_recv(struct morse *mors, struct sk_buff *skb)
 			struct ieee80211_vif *vif = morse_get_vif_from_vif_id(mors, vif_id);
 
 			ret = morse_evt_ocs_done(ieee80211_vif_to_morse_vif(vif), event);
+			break;
+		}
+	case MORSE_COMMAND_EVT_HW_SCAN_DONE:
+		{
+			morse_hw_scan_done_event(mors->hw);
+
+			ret = 0;
+
+			break;
+		}
+	case MORSE_COMMAND_EVT_CHANNEL_USAGE:
+		{
+			struct morse_evt_channel_usage *resp =
+					(struct morse_evt_channel_usage *)event;
+			struct morse_survey_rx_usage_record record;
+
+			record.time_listen = le64_to_cpu(resp->time_listen);
+			record.time_rx = le64_to_cpu(resp->busy_time);
+			record.freq_hz = le32_to_cpu(resp->freq_hz);
+			record.bw_mhz = le32_to_cpu(resp->bw_mhz);
+			record.noise = resp->noise;
+
+			morse_survey_add_channel_usage(mors, &record);
+
+			ret = 0;
+
+			break;
+		}
+	case MORSE_COMMAND_EVT_CONNECTION_LOSS:
+		{
+			struct morse_evt_connection_loss *conn_loss =
+				(struct morse_evt_connection_loss *)event;
+			struct ieee80211_vif *vif = morse_get_vif_from_vif_id(mors, vif_id);
+
+			MORSE_ERR(mors, "%s: connection loss observed on vif:%d, reason: '%s'",
+				__func__, vif_id, connection_loss_reason_to_str(conn_loss->reason));
+
+			if (vif)
+				ieee80211_connection_loss(vif);
+
+			ret = 0;
 			break;
 		}
 	default:

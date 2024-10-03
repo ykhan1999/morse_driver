@@ -1056,18 +1056,15 @@ static irqreturn_t morse_spi_irq_handler(int irq, struct morse_spi *mspi)
 	struct morse *mors = spi_get_drvdata(mspi->spi);
 
 	MORSE_WARN_ON(FEATURE_ID_SPI, !mors);
-	if (irq == gpio_to_irq(mors->cfg->mm_spi_irq_gpio)) {
-		/*
-		 * If we are using edge interrupts, we need to continuously service the IRQ until
-		 * either the chip has cleared all its IRQ bits, or the pin goes high again.
-		 */
-		do {
-			ret = morse_hw_irq_handle(mors);
-		} while (spi_use_edge_irq && ret && !gpio_get_value(mors->cfg->mm_spi_irq_gpio));
+	/*
+	 * If we are using edge interrupts, we need to continuously service the IRQ until
+	 * either the chip has cleared all its IRQ bits, or the pin goes high again.
+	 */
+	do {
+		ret = morse_hw_irq_handle(mors);
+	} while (spi_use_edge_irq && ret && !gpio_get_value(mors->cfg->mm_spi_irq_gpio));
 
-		return IRQ_HANDLED;
-	}
-	return IRQ_NONE;
+	return IRQ_HANDLED;
 }
 
 static void morse_spi_enable_irq(struct morse_spi *mspi)
@@ -1310,8 +1307,13 @@ static int morse_spi_probe(struct spi_device *spi)
 		ret = morse_spi_cmd(mspi, SD_IO_MORSE_INIT, 0x00000000);
 		if (!ret)
 			break;
-		pr_info("%s: SD_IO_RESET\n", __func__);
+		MORSE_DBG(mors, "%s: SD_IO_RESET\n", __func__);
 		morse_spi_cmd(mspi, SD_IO_RESET, 0x00000000);
+	}
+
+	if (ret) {
+		MORSE_SPI_ERR(mors, "failed initialise SPI: %d\n", ret);
+		goto err_cfg;
 	}
 
 	ret = morse_chip_cfg_detect_and_init(mors, mors_chip_series);
@@ -1325,39 +1327,39 @@ static int morse_spi_probe(struct spi_device *spi)
 
 	mors->cfg->mm_ps_gpios_supported = true;
 	ret = morse_spi_reg32_read(mors, MORSE_REG_CHIP_ID(mors), &mors->chip_id);
-
-	if (!ret) {
-		/* Find out if the chip id matches our records */
-		if (!morse_hw_is_valid_chip_id(mors->chip_id, mors->cfg->valid_chip_ids)) {
-			MORSE_SPI_ERR(mors, "%s Morse chip (ChipId=0x%x) not supported\n",
-				      __func__, mors->chip_id);
-			goto err_cfg;
-		}
-		mors->board_serial = serial;
-
-		/*
-		 * Now that a valid chip id has been found, let's enable burst mode.
-		 * The function below will check if burst mode is supported and if so, enable it.
-		 * A NULL check is also performed to make sure the chips that don't have this will
-		 * work with the default inter block delay.
-		 */
-		if (mors->cfg->enable_sdio_burst_mode) {
-			inter_block_delay_nano_s = mors->cfg->enable_sdio_burst_mode(mors);
-
-			if (inter_block_delay_nano_s > 0) {
-				/* No Errors detected, therefore, the value returned can be used to
-				 * set the inter block delay.
-				 */
-				mspi->inter_block_delay_bytes =
-				    inter_block_delay_nano_s /
-				    (SPI_CLK_PERIOD_NANO_S(spi_clock_speed) * 8);
-				mspi->max_block_count =
-				    SPI_MAX_TRANSACTION_SIZE / (MMC_SPI_BLOCKSIZE +
-								mspi->inter_block_delay_bytes);
-			}
-		}
-	} else {
+	if (ret) {
+		MORSE_SPI_ERR(mors, "failed to read chip id: %d\n", ret);
 		goto err_cfg;
+	}
+
+	/* Find out if the chip id matches our records */
+	if (!morse_hw_is_valid_chip_id(mors->chip_id, mors->cfg->valid_chip_ids)) {
+		MORSE_SPI_ERR(mors, "%s Morse chip (ChipId=0x%x) not supported\n",
+					__func__, mors->chip_id);
+		goto err_cfg;
+	}
+	mors->board_serial = serial;
+
+	/*
+	 * Now that a valid chip id has been found, let's enable burst mode.
+	 * The function below will check if burst mode is supported and if so, enable it.
+	 * A NULL check is also performed to make sure the chips that don't have this will
+	 * work with the default inter block delay.
+	 */
+	if (mors->cfg->enable_sdio_burst_mode) {
+		inter_block_delay_nano_s = mors->cfg->enable_sdio_burst_mode(mors);
+
+		if (inter_block_delay_nano_s > 0) {
+			/* No Errors detected, therefore, the value returned can be used to
+			 * set the inter block delay.
+			 */
+			mspi->inter_block_delay_bytes =
+				inter_block_delay_nano_s /
+				(SPI_CLK_PERIOD_NANO_S(spi_clock_speed) * 8);
+			mspi->max_block_count =
+				SPI_MAX_TRANSACTION_SIZE / (MMC_SPI_BLOCKSIZE +
+							mspi->inter_block_delay_bytes);
+		}
 	}
 
 	MORSE_SPI_INFO(mors, "Morse Micro SPI device found, chip ID=0x%04x\n", mors->chip_id);
@@ -1441,6 +1443,11 @@ static int morse_spi_probe(struct spi_device *spi)
 #ifdef CONFIG_MORSE_ENABLE_TEST_MODES
 	if (test_mode == MORSE_CONFIG_TEST_MODE_BUS)
 		ret = morse_bus_test(mors, "SPI");
+
+	if (test_mode == MORSE_CONFIG_TEST_MODE_BUS_PROFILE) {
+		morse_bus_throughput_profiler(mors);
+		morse_spi_disable_irq(mspi);
+	}
 #endif
 
 	return ret;

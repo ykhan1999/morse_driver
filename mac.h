@@ -51,7 +51,8 @@ void morse_mac_skb_free(struct morse *mors, struct sk_buff *skb);
 void morse_mac_update_custom_s1g_capab(struct morse_vif *mors_vif,
 				       struct dot11ah_ies_mask *ies_mask,
 				       enum nl80211_iftype vif_type);
-int morse_mac_pkt_to_s1g(struct morse *mors, struct sk_buff **skb, int *tx_bw_mhz);
+int morse_mac_pkt_to_s1g(struct morse *mors, struct morse_sta *mors_sta,
+			 struct sk_buff **skb, int *tx_bw_mhz);
 
 int morse_mac_watchdog_create(struct morse *mors);
 void morse_mac_mcs0_10_stats_dump(struct morse *mors, struct seq_file *file);
@@ -89,6 +90,9 @@ struct ieee80211_vif *morse_get_sta_vif(struct morse *mors);
 
 /* Return a pointer to the IBSS vif if present otherwise NULL */
 struct ieee80211_vif *morse_get_ibss_vif(struct morse *mors);
+
+/* Return a pointer to the MESH vif if present otherwise NULL */
+struct ieee80211_vif *morse_get_mesh_vif(struct morse *mors);
 
 /* Return iface name for the valid vif */
 char *morse_vif_name(struct ieee80211_vif *vif);
@@ -262,18 +266,19 @@ static inline u16 morse_mac_sta_aid(struct ieee80211_vif *vif)
 }
 
 /**
- * @brief Get CSSID from SSID and SSID length
+ * @brief Get CSSID from SSID and its length for VIF
  *
  * @param vif Interface pointer to VIF
  *
  * @returns Derived CSSID
  */
-static inline u32 morse_mac_generate_cssid(struct ieee80211_vif *vif)
+
+static inline u32 morse_vif_generate_cssid(struct ieee80211_vif *vif)
 {
 #if KERNEL_VERSION(6, 0, 0) > MAC80211_VERSION_CODE
-	return ~crc32(~0, vif->bss_conf.ssid, vif->bss_conf.ssid_len);
+	return morse_generate_cssid(vif->bss_conf.ssid, vif->bss_conf.ssid_len);
 #else
-	return ~crc32(~0, vif->cfg.ssid, vif->cfg.ssid_len);
+	return morse_generate_cssid(vif->cfg.ssid, vif->cfg.ssid_len);
 #endif
 }
 
@@ -352,4 +357,12 @@ u8 *morse_mac_get_ie_pos(struct sk_buff *skb, int *ies_len, int *header_length, 
 int morse_mac_tx_mgmt_frame(struct ieee80211_vif *vif, struct sk_buff *skb);
 
 u64 morse_mac_generate_timestamp_for_frame(struct morse_vif *mors_vif);
+
+/**
+ * morse_mac_is_1mhz_probe_req_enabled - Are 1MHz probe requests enabled.
+ *
+ * Return: true if enabled
+ */
+bool morse_mac_is_1mhz_probe_req_enabled(void);
+
 #endif /* !_MORSE_MAC_H_ */

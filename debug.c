@@ -27,6 +27,7 @@
 #include "ipmon.h"
 #include "vendor_ie.h"
 #include "twt.h"
+#include "coredump.h"
 #include "linux/semaphore.h"
 #include "linux/wait.h"
 #include <linux/ratelimit.h>
@@ -55,6 +56,9 @@ static const char * const morse_log_features[] = {
 	[FEATURE_ID_CAC] = "cac",
 	[FEATURE_ID_SPI] = "spi",
 	[FEATURE_ID_MGMT_FRAMES] = "mgmtfrm",
+	[FEATURE_ID_HWSCAN] = "hwscan",
+	[FEATURE_ID_COREDUMP] = "coredump",
+	[FEATURE_ID_BEACON] = "beacon",
 };
 
 /*
@@ -67,7 +71,7 @@ static const char * const morse_log_features[] = {
  * Note: %pV is used for printing a struct va_format structure.
  */
 #define __generate_log_fn(fn, lvl)							\
-void morse_ ## fn(u32 id, struct morse *mors, const char *fmt, ...)			\
+void morse_ ## fn(u32 id, const struct morse *mors, const char *fmt, ...)			\
 {											\
 	struct va_format vaf = {							\
 		.fmt = fmt,								\
@@ -531,26 +535,6 @@ static const struct file_operations bus_reset_fops = {
 	.open = simple_open,
 	.llseek = no_llseek,
 	.write = morse_debug_bus_reset_write,
-};
-
-static ssize_t morse_debug_fw_reset_write(struct file *file, const char __user *user_buf,
-					  size_t count, loff_t *ppos)
-{
-	struct morse *mors = file->private_data;
-	u8 value;
-
-	if (kstrtou8_from_user(user_buf, count, 0, &value))
-		return -EINVAL;
-	if (value != 1)
-		return -EINVAL;
-	schedule_work(&mors->soft_reset);
-	return count;
-}
-
-static const struct file_operations fw_reset_fops = {
-	.open = simple_open,
-	.llseek = no_llseek,
-	.write = morse_debug_fw_reset_write,
 };
 
 static ssize_t morse_debug_driver_restart_write(struct file *file, const char __user *user_buf,
@@ -1056,8 +1040,6 @@ int morse_init_debug(struct morse *mors)
 	/* populate debugfs */
 	debugfs_create_file("reset", 0600, mors->debug.debugfs_phy, mors, &bus_reset_fops);
 
-	debugfs_create_file("soft_reset", 0600, mors->debug.debugfs_phy, mors, &fw_reset_fops);
-
 	debugfs_create_file("restart", 0600, mors->debug.debugfs_phy, mors, &driver_restart_fops);
 
 	debugfs_create_file("watchdog", 0600, mors->debug.debugfs_phy, mors, &watchdog_fops);
@@ -1205,22 +1187,3 @@ void morse_ipmon(u64 *time_start, struct sk_buff *skb, char *data, int len,
 	}
 }
 #endif
-
-int morse_coredump(struct morse *mors)
-{
-	int ret = 0;
-	static const char *const envp[] = { "HOME=/", NULL };
-	static const char *const argv[] = {
-		"/bin/bash", "-c", "/usr/sbin/morse-core-dump.sh -d", NULL };
-
-	(void)morse_watchdog_pause(mors);
-	morse_claim_bus(mors);
-#if KERNEL_VERSION(4, 14, 0) <= LINUX_VERSION_CODE
-	ret = call_usermodehelper(argv[0], (char **)argv, (char **)envp, UMH_WAIT_PROC);
-#else
-	ret = call_usermodehelper((char *)argv[0], (char **)argv, (char **)envp, UMH_WAIT_PROC);
-#endif
-	morse_release_bus(mors);
-	(void)morse_watchdog_resume(mors);
-	return ret;
-}

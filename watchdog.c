@@ -34,19 +34,18 @@ static enum hrtimer_restart morse_watchdog_fire(struct hrtimer *timer)
 	if (mors->watchdog.ping) {
 		if (!mors->watchdog.paused)
 			mors->watchdog.ping(mors);
-	} else {
-		/* Force a driver reset */
-		if (mors->watchdog.reset)
-			mors->watchdog.reset(mors);
-		else
-			MORSE_ERR(mors, "%s: The reset callback is not defined.\n", __func__);
 	}
 
 	/* Get the updated watchdog interval secs */
 	mors->watchdog.interval_secs = morse_mac_get_watchdog_interval_secs();
 
 	interval = ktime_set(mors->watchdog.interval_secs, 0);
+
+#if defined(MAC80211_BACKPORT_VERSION_CODE) && (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
+	hrtimer_forward_now(&mors->watchdog.timer, interval.tv64);
+#else
 	hrtimer_forward_now(&mors->watchdog.timer, interval);
+#endif
 
 	return HRTIMER_RESTART;
 }
@@ -55,7 +54,7 @@ static void watchdog_timer_start(struct morse *mors)
 {
 	ktime_t interval = ktime_set(mors->watchdog.interval_secs, 0);
 
-#if defined(MAC80211_BACKPORT_VERSION_CODE) && (KERNEL_VERSION(4, 10, 0) <= MAC80211_VERSION_CODE)
+#if defined(MAC80211_BACKPORT_VERSION_CODE) && (KERNEL_VERSION(4, 10, 0) > LINUX_VERSION_CODE)
 	hrtimer_start(&mors->watchdog.timer, interval.tv64, HRTIMER_MODE_REL);
 #else
 	hrtimer_start(&mors->watchdog.timer, interval, HRTIMER_MODE_REL);
@@ -189,17 +188,16 @@ int morse_watchdog_get_interval(struct morse *mors)
 	return mors->watchdog.interval_secs;
 }
 
-int morse_watchdog_init(struct morse *mors, int interval_secs,
-			watchdog_callback_t ping, watchdog_callback_t reset)
+int morse_watchdog_init(struct morse *mors, int interval_s,
+						watchdog_callback_t ping)
 {
 	int ret = 0;
 
 	hrtimer_init(&mors->watchdog.timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	mors->watchdog.timer.function = &morse_watchdog_fire;
 
-	mors->watchdog.interval_secs = interval_secs;
+	mors->watchdog.interval_secs = interval_s;
 	mors->watchdog.ping = ping;
-	mors->watchdog.reset = reset;
 	mors->watchdog.consumers = 0;
 	mors->watchdog.paused = 0;
 

@@ -226,7 +226,7 @@ void morse_mbssid_insert_ie(struct morse_vif *mors_vif, struct morse *mors,
 	}
 }
 
-#if KERNEL_VERSION(5, 1, 0) < LINUX_VERSION_CODE
+#if KERNEL_VERSION(5, 1, 0) < MAC80211_VERSION_CODE
 int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 					struct dot11ah_ies_mask *ies_mask,
 					struct ieee80211_vif *vif,

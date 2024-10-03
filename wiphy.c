@@ -25,6 +25,7 @@
 #include <linux/rtnetlink.h>
 #include <asm/div64.h>
 
+#include "bus.h"
 #include "command.h"
 #include "morse.h"
 #include "mac.h"

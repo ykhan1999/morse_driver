@@ -26,10 +26,10 @@
 #define MORSE_US_TO_TU(x)		((x) / 1024)
 
 /** Convert from a time in time units (1024us) to us */
-#define MORSE_TU_TO_US(x)		((x) * 1024)
+#define MORSE_TU_TO_US(x)		((x) * 1024UL)
 
 /** Convert from a time in time units (1024us) to ms */
-#define MORSE_TU_TO_MS(x)		(MORSE_TU_TO_US(x) / 1000)
+#define MORSE_TU_TO_MS(x)		(MORSE_TU_TO_US(x) / 1000UL)
 
 /** Convert seconds to milliseconds */
 #define MORSE_SECS_TO_MSECS(x)	((x) * 1000)

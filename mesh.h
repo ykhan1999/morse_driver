@@ -23,6 +23,11 @@
 #include "dot11ah/dot11ah.h"
 #include "command.h"
 
+#define MORSE_MESH_DBG(_m, _f, _a...)		morse_dbg(FEATURE_ID_MESH, _m, _f, ##_a)
+#define MORSE_MESH_INFO(_m, _f, _a...)		morse_info(FEATURE_ID_MESH, _m, _f, ##_a)
+#define MORSE_MESH_WARN(_m, _f, _a...)		morse_warn(FEATURE_ID_MESH, _m, _f, ##_a)
+#define MORSE_MESH_ERR(_m, _f, _a...)		morse_err(FEATURE_ID_MESH, _m, _f, ##_a)
+
 /** AMPE (Authenticated Mesh Peering Exchange) Block Size for MPM Open Frame */
 #define AMPE_BLOCK_SIZE_OPEN_FRAME		98
 /** length of the IGTK data in AMPE block (KeyID - 2bytes, IPN - 6 bytes, Key Len - 16 bytes) */
@@ -105,17 +110,8 @@ struct beacon_timing_element {
 
 struct morse_cmd_mesh_config {
 	struct morse_cmd_header hdr;
-	/** Length of the Mesh ID */
-	u8 mesh_id_len;
-
-	/** Mesh ID of the network */
-	char mesh_id[IEEE80211_MAX_SSID_LEN];
-
-	/** Mode of mesh beaconless operation */
-	u8 mesh_beaconless_mode;
-
-	/** Maximum number of peer links */
-	u8 max_plinks;
+	/** Mesh specific config params */
+	struct morse_mesh_config cfg;
 } __packed;
 
 struct morse_cmd_mbca {
@@ -210,6 +206,17 @@ static inline void morse_enable_mbca_capability(u8 *mesh_config_ie)
 }
 
 /**
+ * morse_restore_mesh_config() - Restores the mesh config to VIF mesh context,
+ *				which is stored earlier when the config is received from
+ *				wpa_supplicant via morsectrl
+ *
+ * @mors_vif : The mesh VIF in which config is being restored
+ *
+ * return 0 on success, relevant error on failure
+ */
+int morse_restore_mesh_config(struct morse_vif *mors_vif);
+
+/**
  * morse_dot11_get_mpm_ampe_len() - Finds length of AMPE element (Authenticated
  *	Mesh Peering Exchange) in Mesh Peer management (MPM) frames
  *
@@ -220,15 +227,17 @@ static inline void morse_enable_mbca_capability(u8 *mesh_config_ie)
 int morse_dot11_get_mpm_ampe_len(struct sk_buff *skb);
 
 /**
- * morse_cmd_set_mesh_config() - Saves Mesh ID in driver, sent from supplicant
+ * morse_cmd_set_mesh_config() - Saves Mesh config in driver
  *
  * @mors_vif: pointer to morse interface
  * @mesh_config: pointer to mesh config structure
+ * @stored_config: pointer to mesh config from the stored list if its a restore
  *
  * Return: 0 on success and error code on failure
  */
 int morse_cmd_set_mesh_config(struct morse_vif *mors_vif,
-			      struct morse_cmd_mesh_config *mesh_config);
+			      struct morse_cmd_mesh_config *mesh_config,
+			      struct morse_mesh_config_list *stored_config);
 
 /**
  * morse_insert_beacon_timing_element() - Inserts Beacon Timing Element in Beacon or Probe Response
@@ -345,6 +354,20 @@ int morse_cmd_process_dynamic_peering_conf(struct morse_vif *mors_vif,
  */
 int morse_mac_process_mesh_tx_mgmt(struct morse_vif *mors_vif,
 				   struct sk_buff *skb, struct dot11ah_ies_mask *ies_mask);
+
+/**
+ * morse_mac_clear_mesh_list() - Free up the mesh config list when device restarts
+ *
+ * @mors: Global morse struct
+ */
+void morse_mac_clear_mesh_list(struct morse *mors);
+
+/**
+ * morse_mesh_config_list_init () - Initializes local mesh config context
+ *
+ * @mors: Global morse struct
+ */
+void morse_mesh_config_list_init(struct morse *mors);
 
 /**
  * morse_mesh_deinit() - Mesh de-initialization

@@ -23,6 +23,7 @@
 #include "hw.h"
 #include "morse.h"
 #include "firmware.h"
+#include "mac.h"
 #include "bus.h"
 #include "debug.h"
 #include "pageset.h"
@@ -85,6 +86,9 @@
 
 #define MM6108_REG_OTP_DATA_BASE_ADDRESS	0x10054118
 
+/* CLK enables */
+#define MM610X_CORE_CLK_ENABLE_MASK (GENMASK(3, 0))
+
 #define MM6108_FW_BASE				"mm6108"
 
 static const char *mm610x_get_hw_version(u32 chip_id)
@@ -98,6 +102,18 @@ static const char *mm610x_get_hw_version(u32 chip_id)
 		return "MM6108-A2";
 	}
 	return "unknown";
+}
+
+static char *mm610x_get_fw_path(u32 chip_id)
+{
+	const char *fw_variant = "";
+
+	if (is_thin_lmac_mode())
+		fw_variant = MORSE_FW_THIN_LMAC_STRING;
+	else if (is_virtual_sta_test_mode())
+		fw_variant = MORSE_FW_VIRTUAL_STA_STRING;
+
+	return kasprintf(GFP_KERNEL, MORSE_FW_DIR "/" MM6108_FW_BASE "%s" MORSE_FW_EXT, fw_variant);
 }
 
 static u8 mm610x_get_wakeup_delay_ms(u32 chip_id)
@@ -141,7 +157,6 @@ static int mm610x_ext_xtal_init(struct morse *mors)
 
 	/* It's now initialised no need to wait further in sdio logic */
 	mors->cfg->xtal_init_sdio_trans_delay_ms = 0;
-
 	return 0;
 }
 
@@ -232,6 +247,27 @@ static int mm610x_read_encoded_country(struct morse *mors)
 	return ret;
 }
 
+static int mm610x_pre_coredump_hook(struct morse *mors, enum morse_coredump_method method)
+{
+	int ret;
+	u32 clk_reg;
+
+	if (method == COREDUMP_METHOD_USERSPACE_SCRIPT)
+		return 0;
+
+	ret = morse_reg32_read(mors, MORSE_REG_CLK_CTRL(mors), &clk_reg);
+	if (ret)
+		return ret;
+
+	/* Clear all clock enables for each core. This is to reduce the likelihood
+	 * of bus contention while the driver initiates reads of imem/dmem.
+	 */
+	clk_reg &= ~(u32)(MM610X_CORE_CLK_ENABLE_MASK);
+	ret = morse_reg32_write(mors, MORSE_REG_CLK_CTRL(mors), clk_reg);
+
+	return ret;
+}
+
 static const struct morse_hw_regs mm6108_regs = {
 	/* Register address maps */
 	.irq_base_address = MM6108_REG_INT_BASE,
@@ -273,16 +309,18 @@ static const struct morse_hw_regs mm6108_regs = {
 struct morse_hw_cfg mm6108_cfg = {
 	.regs = &mm6108_regs,
 	.chip_id_address = MM6108_REG_CHIP_ID,
-	.fw_base = MM6108_FW_BASE,
 	.ops = &morse_pageset_hw_ops,
 	.get_ps_wakeup_delay_ms = mm610x_get_wakeup_delay_ms,
 	.enable_sdio_burst_mode = mm610x_enable_burst_mode,
 	.get_board_type = mm610x_read_board_type,
 	.get_encoded_country = mm610x_read_encoded_country,
 	.get_hw_version = mm610x_get_hw_version,
+	.get_fw_path = mm610x_get_fw_path,
 	.digital_reset = mm610x_digital_reset,
+	.pre_coredump_hook = mm610x_pre_coredump_hook,
 	.board_type_max_value = MM610X_BOARD_TYPE_MAX_VALUE,
 	.bus_double_read = true,
+	.enable_short_bcn_as_dtim = false,
 	.valid_chip_ids = {
 			   MM6108A0_ID,
 			   MM6108A1_ID,
@@ -295,5 +333,5 @@ struct morse_chip_series mm61xx_chip_series = {
 };
 
 MODULE_FIRMWARE(MORSE_FW_DIR "/" MM6108_FW_BASE MORSE_FW_EXT);
-MODULE_FIRMWARE(MORSE_FW_DIR "/" MM6108_FW_BASE MORSE_FW_THIN_LMAC_SUFFIX MORSE_FW_EXT);
-MODULE_FIRMWARE(MORSE_FW_DIR "/" MM6108_FW_BASE MORSE_FW_VIRTUAL_STA_SUFFIX MORSE_FW_EXT);
+MODULE_FIRMWARE(MORSE_FW_DIR "/" MM6108_FW_BASE MORSE_FW_THIN_LMAC_STRING MORSE_FW_EXT);
+MODULE_FIRMWARE(MORSE_FW_DIR "/" MM6108_FW_BASE MORSE_FW_VIRTUAL_STA_STRING MORSE_FW_EXT);

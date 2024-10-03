@@ -35,7 +35,7 @@
 #include "bus.h"
 
 /* Enable/Disable avoid buffer bloating */
-static int max_txq_len __read_mostly = 22;
+static int max_txq_len __read_mostly = 32;
 module_param(max_txq_len, int, 0644);
 MODULE_PARM_DESC(max_txq_len, "Maximum number of queued TX packets");
 
@@ -454,8 +454,8 @@ static void morse_skbq_dispatch_work(struct work_struct *dispatch_work)
 		/* Header endianness has already be adjusted */
 		hdr = (struct morse_buff_skb_header *)pfirst->data;
 		channel = hdr->channel;
-		/* Remove morse header */
-		__skb_pull(pfirst, sizeof(*hdr));
+		/* Remove morse header and padding */
+		__skb_pull(pfirst, sizeof(*hdr) + hdr->offset);
 
 		switch (channel) {
 		case MORSE_SKB_CHAN_COMMAND:
@@ -483,7 +483,7 @@ static void morse_skbq_dispatch_work(struct work_struct *dispatch_work)
 void morse_skb_remove_hdr_after_sent_to_chip(struct sk_buff *skb)
 {
 	skb_pull(skb, sizeof(struct morse_buff_skb_header) +
-		((struct morse_buff_skb_header *)skb->data)->tail);
+		((struct morse_buff_skb_header *)skb->data)->offset);
 }
 
 int morse_skbq_put(struct morse_skbq *mq, struct sk_buff *skb)
@@ -711,6 +711,7 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 	struct morse *mors = mq->mors;
 	bool mq_over_threshold;
 	int rc;
+	struct morse_buff_skb_header *hdr = (struct morse_buff_skb_header *)skb->data;
 
 	/* TODO data Alignment */
 	spin_lock_bh(&mq->lock);
@@ -737,10 +738,8 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 
 #ifdef CONFIG_MORSE_IPMON
 	{
-		struct morse_buff_skb_header *hdr;
 		static u64 time_start;
 
-		hdr = (struct morse_buff_skb_header *)skb->data;
 		if (channel == MORSE_SKB_CHAN_DATA)
 			morse_ipmon(&time_start, skb, skb->data + sizeof(*hdr),
 				    le16_to_cpu(hdr->len), IPMON_LOC_CLIENT_DRV2,
@@ -760,6 +759,12 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 		break;
 	case MORSE_SKB_CHAN_MGMT:
 		set_bit(MORSE_TX_MGMT_PEND, &mors->chip_if->event_flags);
+		queue_work(mors->chip_wq, &mors->chip_if_work);
+		break;
+	case MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON:
+		set_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, &mors->chip_if->event_flags);
+		/* Overwrite the channel to the actual channel what target understands */
+		hdr->channel = MORSE_SKB_CHAN_BEACON;
 		queue_work(mors->chip_wq, &mors->chip_if_work);
 		break;
 	case MORSE_SKB_CHAN_BEACON:
@@ -1290,6 +1295,16 @@ u32 morse_skbq_count(struct morse_skbq *mq)
 	return count;
 }
 
+u32 morse_skbq_pending_count(struct morse_skbq *mq)
+{
+	u32 count;
+
+	spin_lock_bh(&mq->lock);
+	count = mq->pending.qlen;
+	spin_unlock_bh(&mq->lock);
+	return count;
+}
+
 u32 morse_skbq_count_tx_ready(struct morse_skbq *mq)
 {
 	struct morse *mors = mq->mors;
@@ -1355,17 +1370,21 @@ int morse_skbq_skb_tx(struct morse_skbq *mq, struct sk_buff **skb_orig,
 
 	mors = mq->mors;
 
+	if (test_bit(MORSE_STATE_FLAG_CHIP_UNRESPONSIVE, &mors->state_flags))
+		return -ENODEV;
+
 	set_queued_tx_skb_expiry(skb);
 
 	if (morse_skbq_mon)
 		morse_skbq_mon_adjust(mors, skb, 1);
 
 	data = skb->data;
-	aligned_head = align_down((data - sizeof(hdr)), mors->bus_ops->bulk_alignment);
+	aligned_head = align_down((data - sizeof(hdr) - mors->extra_tx_offset),
+				  mors->bus_ops->bulk_alignment);
 	hdr.sync = MORSE_SKB_HEADER_SYNC;
 	hdr.channel = channel;
 	hdr.len = skb->len;
-	hdr.tail = data - (aligned_head + sizeof(hdr));
+	hdr.offset = data - (aligned_head + sizeof(hdr));
 	hdr.checksum_upper = 0;
 	hdr.checksum_lower = 0;
 	if (tx_info)

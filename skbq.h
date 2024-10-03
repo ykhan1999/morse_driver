@@ -144,6 +144,15 @@ u32 morse_skbq_count_tx_ready(struct morse_skbq *mq);
 u32 morse_skbq_count(struct morse_skbq *mq);
 
 /**
+ * morse_skbq_pending_count - Checks number of SKBs pending in the skb queue.
+ *
+ * @mq: SKB queue.
+ *
+ * Return: Number of skbs pending (awaiting tx status) in the queue.
+ */
+u32 morse_skbq_pending_count(struct morse_skbq *mq);
+
+/**
  * @brief Pause the DATA Qs. This can only be called from the same context
  *        that could wake the Qs (i.e. ChipWQ).
  *

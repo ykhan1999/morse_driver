@@ -43,3 +43,13 @@
 #endif
 #endif
 #endif
+
+#if !defined(struct_size)
+/* Older kernels dont support this. Just add a simple def for it */
+#define struct_size(p, member, count)					\
+	(sizeof(*(p)) + (sizeof(*(p)->member) * count))
+#endif
+
+#if !defined(EM_RISCV)
+#define EM_RISCV 243
+#endif

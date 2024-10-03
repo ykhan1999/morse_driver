@@ -1556,43 +1556,18 @@ static u64 twt_calculate_wake_interval(u16 mantissa, int exponent)
 static u64 twt_calculate_wake_interval_fields(u64 wake_interval, u16 *mantissa, int *exponent)
 {
 	/* Calculate wake interval fields; wake interval = mantissa * 2^exponent */
-	if (wake_interval > __UINT16_MAX__) {
-		/* Brute force our way to the closest approximation of wake_interval */
-		int e = 0;
-		int m = __UINT16_MAX__;
-		u64 difference = __UINT64_MAX__;
+	u64 m = wake_interval;
+	int e = 0;
 
-		for (e = 0; e <= TWT_WAKE_INTERVAL_EXPONENT_MAX_VAL; e++) {
-			u64 calculated = twt_calculate_wake_interval(m, e);
-
-			if (calculated > wake_interval)
-				break;
-		}
-
-		e = min(e, TWT_WAKE_INTERVAL_EXPONENT_MAX_VAL);
-
-		for (m = 0; m < __UINT16_MAX__; m++) {
-			u64 interval = twt_calculate_wake_interval(m, e);
-
-			if (abs(wake_interval - interval) > difference) {
-				/* let's take the mantissa that gave us the closest approximation */
-				m -= 1;
-				break;
-			}
-
-			difference = abs(wake_interval - interval);
-		}
-
-		/* Set wake interval so caller knows what it got rounded to */
-		*mantissa = m;
-		*exponent = e;
-		wake_interval = twt_calculate_wake_interval(m, e);
-	} else {
-		*exponent = 0;
-		*mantissa = (int)wake_interval;
+	while (m > __UINT16_MAX__) {
+		/* Every shift increases the exponent by 1 as the mantissa is being halved */
+		e++;
+		m >>= 1;
 	}
+	*mantissa = (u16)m;
+	*exponent = e;
 
-	return wake_interval;
+	return twt_calculate_wake_interval(*mantissa, *exponent);
 }
 
 static int morse_twt_process_set_cmd(struct morse *mors,

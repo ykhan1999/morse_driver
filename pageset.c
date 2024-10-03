@@ -212,13 +212,19 @@ static bool morse_pageset_page_is_cached(struct morse_pageset *pageset, struct m
 	return false;
 }
 
-static void morse_pageset_page_return_handler_no_lock(struct morse_pageset *pageset)
+static void morse_pageset_to_chip_return_handler_no_lock(struct morse *mors)
 {
+	struct morse_pageset *pageset = mors->chip_if->to_chip_pageset;
 	struct morse_pager *pager = pageset->return_pager;
 	struct morse_page page;
 	int ret;
 	bool pager_empty = false;
-	bool page_popped = false;
+	unsigned int popped = 0;
+	/* Continue to pop until either the pager is exhausted or more than
+	 * double the amount of possible cache entries have been popped.
+	 * (to max bound this loop in the event of hardware failure)
+	 */
+	unsigned int max_expected_pops = kfifo_size(&pageset->cached_pages) * 2;
 
 	MORSE_WARN_ON(FEATURE_ID_PAGER, !is_pageset_locked(pageset));
 
@@ -228,37 +234,39 @@ static void morse_pageset_page_return_handler_no_lock(struct morse_pageset *page
 			break;
 		}
 
-		page_popped = true;
+		popped++;
 		if (morse_pageset_page_is_cached(pageset, &page))
 			continue;
 
 		ret = kfifo_put(&pageset->reserved_pages, page);
-		WARN_ON(!ret);
+		MORSE_WARN_ON(FEATURE_ID_PAGER, !ret);
 	}
 
 	if (pager_empty)
 		goto exit;
 
-	while (kfifo_len(&pageset->cached_pages) < CACHED_PAGES_MAX) {
+	while (popped < max_expected_pops) {
 		if (pager->ops->pop(pager, &page))
 			break;
 
-		page_popped = true;
+		popped++;
 		if (morse_pageset_page_is_cached(pageset, &page))
 			continue;
 
 		ret = kfifo_put(&pageset->cached_pages, page);
-		WARN_ON(!ret);
+		MORSE_WARN_ON(FEATURE_ID_PAGER, !ret);
 	}
 
+	MORSE_WARN_ON(FEATURE_ID_PAGER, popped >= max_expected_pops);
+
 exit:
-	if (page_popped)
+	if (popped)
 		pager->ops->notify(pager);
 }
 
-static void morse_pageset_page_return_handler(struct morse_pageset *pageset, bool have_lock)
+static void morse_pageset_to_chip_return_handler(struct morse *mors, bool have_lock)
 {
-	struct morse *mors = pageset->mors;
+	struct morse_pageset *pageset = mors->chip_if->to_chip_pageset;
 
 	if (!have_lock) {
 		int ret = 0;
@@ -270,7 +278,7 @@ static void morse_pageset_page_return_handler(struct morse_pageset *pageset, boo
 		}
 	}
 
-	morse_pageset_page_return_handler_no_lock(mors->chip_if->to_chip_pageset);
+	morse_pageset_to_chip_return_handler_no_lock(mors);
 
 	if (!have_lock)
 		pageset_unlock(pageset);
@@ -321,8 +329,7 @@ static bool morse_pageset_rsved_page_is_avail(struct morse_pageset *pageset, u8 
 		 * response, so check again if it's not already available.
 		 */
 		if (kfifo_is_empty(&pageset->reserved_pages)) {
-			morse_pageset_page_return_handler(mors->chip_if->to_chip_pageset,
-							  have_lock);
+			morse_pageset_to_chip_return_handler(mors, have_lock);
 			if (kfifo_is_empty(&pageset->reserved_pages)) {
 				mors->debug.page_stats.cmd_no_page++;
 				MORSE_ERR(mors, "%s unexpected command page exhaustion\n",
@@ -518,16 +525,16 @@ int morse_pageset_read(struct morse_pageset *pageset)
 	}
 
 	/* SW-3875: seems like sdio read can sometimes go wrong and read first 4-bytes word twice,
-	 * overwriting second word (hence, tail will be overwritten with 'sync' byte). Anyway, we
-	 * should not expect tail value to be larger than word alignment (max 3 bytes)
+	 * overwriting second word (hence, offset will be overwritten with 'sync' byte). Anyway, we
+	 * should not expect offset value to be larger than word alignment (max 3 bytes)
 	 */
-	if (hdr->tail > 3) {
+	if (hdr->offset > 3) {
 		MORSE_ERR(mors,
-			  "%s: corrupted skb header tail [tail=%u], hdr.len %d, page addr: 0x%08x\n",
-			  __func__, hdr->tail, hdr->len, page.addr);
+			  "%s: corrupted skb header offset [offset=%u], hdr.len %d, page addr: 0x%08x\n",
+			  __func__, hdr->offset, hdr->len, page.addr);
 
 		/* Should we actually do that, or just fail the page and go to exit_return_page? */
-		hdr->tail = (hdr->len & 0x03) ? (4 - (unsigned long)(hdr->len & 3)) : 0;
+		hdr->offset = (hdr->len & 0x03) ? (4 - (unsigned long)(hdr->len & 3)) : 0;
 	}
 
 	/* Get correct skbq for the data based on the declared channel */
@@ -559,7 +566,7 @@ int morse_pageset_read(struct morse_pageset *pageset)
 	}
 
 	/* Read of page can be greater than actual size of data - so trim */
-	skb_len = sizeof(*hdr) + le16_to_cpu(hdr->len);
+	skb_len = sizeof(*hdr) + le16_to_cpu(hdr->offset) + le16_to_cpu(hdr->len);
 	skb_trim(skb, skb_len);
 
 #ifdef CONFIG_MORSE_IPMON
@@ -853,6 +860,14 @@ void morse_pagesets_work(struct work_struct *work)
 	morse_ps_disable(mors);
 	morse_claim_bus(mors);
 
+	/* Tx time critical beacons first */
+	if (test_and_clear_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags)) {
+		if (morse_pageset_tx_beacon_handler(mors->chip_if->to_chip_pageset))
+			set_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags);
+		else
+			clear_bit(MORSE_TX_BEACON_PEND, flags);
+	}
+
 	/* Handle any populated RX pages from chip first to
 	 * avoid dropping pkts due to full on-chip buffers.
 	 * Check if all pages were removed, set event flags if not.
@@ -869,7 +884,7 @@ void morse_pagesets_work(struct work_struct *work)
 
 	/* Handle any free TX pages being returned so caches are refilled */
 	if (test_and_clear_bit(MORSE_PAGE_RETURN_PEND, flags))
-		morse_pageset_page_return_handler(mors->chip_if->to_chip_pageset, false);
+		morse_pageset_to_chip_return_handler(mors, false);
 
 	/* TX any commands before anything else */
 	if (test_and_clear_bit(MORSE_TX_COMMAND_PEND, flags)) {
@@ -877,10 +892,15 @@ void morse_pagesets_work(struct work_struct *work)
 			set_bit(MORSE_TX_COMMAND_PEND, flags);
 	}
 
-	/* TX beacons before considering mgmt/data */
-	if (test_and_clear_bit(MORSE_TX_BEACON_PEND, flags)) {
+	/* TX beacons before considering mgmt/data. Also check for time critical beacon,
+	 * if it is not sent already due to unavailability of pages
+	 */
+	if (test_and_clear_bit(MORSE_TX_BEACON_PEND, flags) ||
+		test_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags)) {
 		if (morse_pageset_tx_beacon_handler(mors->chip_if->to_chip_pageset))
 			set_bit(MORSE_TX_BEACON_PEND, flags);
+		else
+			clear_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags);
 	}
 
 	/* TX mgmt before considering data */

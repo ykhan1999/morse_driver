@@ -25,8 +25,8 @@
 
 #define BCF_DATABASE_SIZE               (1024)	/* From firmware */
 #define MORSE_FW_DIR                    "morse"
-#define MORSE_FW_THIN_LMAC_SUFFIX       "-tlm"
-#define MORSE_FW_VIRTUAL_STA_SUFFIX     "-vst"
+#define MORSE_FW_THIN_LMAC_STRING       "-tlm"
+#define MORSE_FW_VIRTUAL_STA_STRING     "-vst"
 #define MORSE_FW_EXT                    ".bin"
 
 #define IFLASH_BASE_ADDR	0x400000
@@ -42,8 +42,18 @@
 #endif
 
 enum morse_fw_info_tlv_type {
-	MORSE_FW_INFO_TLV_BCF_ADDR = 1
+	MORSE_FW_INFO_TLV_BCF_ADDR = 1,
+	MORSE_FW_INFO_TLV_COREDUMP_MEM_REGION = 2,
 };
+
+struct morse_fw_info_tlv_coredump_mem {
+	/* region type (see morse_coredump_mem_region_type) */
+	__le32 region_type;
+	/* on-chip start address of the region */
+	__le32 start;
+	/* the length of the region */
+	__le32 len;
+} __packed;
 
 struct morse_fw_info_tlv {
 	__le16 type;

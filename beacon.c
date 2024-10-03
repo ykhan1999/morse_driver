@@ -32,13 +32,28 @@
 
 #define FRAGMENTATION_OVERHEAD			(36)
 
+#define MORSE_BEACON_DBG(_m, _f, _a...)   morse_dbg(FEATURE_ID_BEACON, _m, _f, ##_a)
+#define MORSE_BEACON_INFO(_m, _f, _a...)  morse_info(FEATURE_ID_BEACON, _m, _f, ##_a)
+#define MORSE_BEACON_WARN(_m, _f, _a...)  morse_warn(FEATURE_ID_BEACON, _m, _f, ##_a)
+#define MORSE_BEACON_ERR(_m, _f, _a...)   morse_err(FEATURE_ID_BEACON, _m, _f, ##_a)
+#define MORSE_BEACON_ERR_RATELIMITED(_m, _f, _a...) \
+	morse_err_ratelimited(FEATURE_ID_BEACON, _m, _f, ##_a)
+#define MORSE_BEACON_WARN_RATELIMITED(_m, _f, _a...) \
+	morse_warn_ratelimited(FEATURE_ID_BEACON, _m, _f, ##_a)
+
 /**
  * Max beacon length limit for 1MHz, MCS0. If the beacon is larger than this it may get
  * fragmented by the FW, which is not permitted by the 802.11 protocol.
  */
 #define DOT11AH_1MHZ_MCS0_MAX_BEACON_LENGTH			(764 - FRAGMENTATION_OVERHEAD)
 
+static int enable_short_bcn_as_dtim_override = -1;
+module_param(enable_short_bcn_as_dtim_override, int, 0644);
+MODULE_PARM_DESC(enable_short_bcn_as_dtim_override,
+		 "Override enable for short beacon to be the DTIM beacon (experimental)");
+
 static unsigned long beacon_irqs_enabled;
+static bool enable_short_bcn_as_dtim;
 
 bool morse_mac_is_s1g_long_beacon(struct morse *mors, struct sk_buff *skb)
 {
@@ -93,7 +108,7 @@ void morse_insert_beacon_timing_element(struct morse_vif *mors_vif, struct sk_bu
 		beacon_timing_element_size = sizeof(struct beacon_timing_element) +
 		    (no_of_mesh_neighbors * sizeof(struct mesh_neighbor_beacon_info));
 
-		MORSE_DBG(mors, "%s: no_of_neighbors=%d, ie_size=%d, beacon_count=%d\n", __func__,
+		MORSE_BEACON_DBG(mors, "%s: neighbors: %d, ie len: %d, bcn count: %d\n", __func__,
 			  no_of_mesh_neighbors, beacon_timing_element_size,
 			  mors_vif->mesh->mbca.beacon_count);
 
@@ -132,6 +147,33 @@ static void morse_beacon_fill_tx_info(struct morse *mors, struct morse_skb_tx_in
 		tx_info->flags |= cpu_to_le32(MORSE_TX_CONF_FLAGS_IMMEDIATE_REPORT);
 }
 
+/**
+ * morse_is_time_critical_beacon() - Checks if the beacon contains ECSA/Page Slice IEs
+ * or TIM with traffic indicator bit set.
+ *
+ * @mors_vif: Pointer to morse interface
+ * @ies_mask: Beacon information elements.
+ *
+ * Return: True if time critical beacon or false.
+ */
+static bool morse_is_time_critical_beacon(struct morse_vif *mors_vif,
+	struct dot11ah_ies_mask *ies_mask)
+{
+	struct ieee80211_tim_ie *tim = (struct ieee80211_tim_ie *)ies_mask->ies[WLAN_EID_TIM].ptr;
+
+	if (ies_mask->ies[WLAN_EID_EXT_CHANSWITCH_ANN].ptr)
+		return true;
+
+	if (ies_mask->ies[WLAN_EID_PAGE_SLICE].ptr)
+		return true;
+
+	/* Check if broadcast/multicast data is buffered */
+	if (tim && (tim->bitmap_ctrl & 0x1))
+		return true;
+
+	return false;
+}
+
 static void morse_beacon_tasklet(unsigned long data)
 {
 	struct morse_skbq *mq;
@@ -155,6 +197,9 @@ static void morse_beacon_tasklet(unsigned long data)
 	struct morse_mesh *mesh;
 	u8 page_slice_no = S1G_TIM_PAGE_SLICE_ENTIRE_PAGE;
 	u8 page_index = 0;
+	bool fw_reports_tx_beacon_comp;
+	int num_bcn_vifs;
+	uint long_beacon_dtim_count;
 
 	if (!mors_vif || !mors_vif->custom_configs)
 		return;
@@ -169,13 +214,41 @@ static void morse_beacon_tasklet(unsigned long data)
 	if (!morse_mac_is_iface_ap_type(vif))
 		return;
 
+	/* Set the long beacon index to 0 if long beacon is the DTIM beacon
+	 * otherwise shift the long beacon to be the beacon immediately after the DTIM beacon
+	 */
+	long_beacon_dtim_count = enable_short_bcn_as_dtim ? (vif->bss_conf.dtim_period - 1) : 0;
+	fw_reports_tx_beacon_comp = mors->firmware_flags &
+		MORSE_FW_FLAGS_REPORTS_TX_BEACON_COMPLETION;
+	num_bcn_vifs = atomic_read(&mors->num_bcn_vifs);
+
 	chip_if_ops = mors->cfg->ops;
+
+	mq = chip_if_ops->skbq_bcn_tc_q(mors);
+	if (!mq) {
+		MORSE_BEACON_ERR_RATELIMITED(mors, "%s: no matching Q found\n", __func__);
+		return;
+	}
+
+	if (morse_skbq_count(mq) >= num_bcn_vifs) {
+		MORSE_BEACON_ERR_RATELIMITED(mors,
+			"%s: previous beacon not consumed, dropping req [id:%d]\n",
+			__func__, mors_vif->id);
+		return;
+	}
+
+	/* The following can occur if the TX status reporting the beacon completion
+	 * gets lost. A stale timer in skbq will eventually flush the pending frame.
+	 */
+	if (fw_reports_tx_beacon_comp && morse_skbq_pending_count(mq) && num_bcn_vifs == 1)
+		MORSE_BEACON_DBG(mors, "%s: number of beacons awaiting tx status: %u\n",
+						__func__, morse_skbq_pending_count(mq));
 
 	ies_mask = morse_dot11ah_ies_mask_alloc();
 	if (!ies_mask)
 		return;
 
-	short_beacon = (mors_vif->dtim_count != 0);
+	short_beacon = (mors_vif->dtim_count != long_beacon_dtim_count);
 
 #if KERNEL_VERSION(6, 0, 0) > MAC80211_VERSION_CODE
 	beacon = ieee80211_beacon_get(mors->hw, vif);
@@ -185,22 +258,7 @@ static void morse_beacon_tasklet(unsigned long data)
 #endif
 
 	if (!beacon) {
-		MORSE_ERR_RATELIMITED(mors, "ieee80211_beacon_get failed\n");
-		goto exit;
-	}
-
-	mq = chip_if_ops->skbq_bcn_tc_q(mors);
-	if (!mq) {
-		MORSE_ERR(mors, "chip_if_ops->skbq_bcn_tc_q(mors); failed, no matching Q found\n");
-		kfree_skb(beacon);
-		goto exit;
-	}
-
-	if (morse_skbq_count(mq) >= atomic_read(&mors->num_bcn_vifs)) {
-		MORSE_ERR_RATELIMITED(mors,
-			"Previous beacon not consumed yet,dropping beacon req [id:%d]\n",
-			mors_vif->id);
-		kfree_skb(beacon);
+		MORSE_BEACON_ERR_RATELIMITED(mors, "%s: ieee80211_beacon_get failed\n", __func__);
 		goto exit;
 	}
 
@@ -211,15 +269,16 @@ static void morse_beacon_tasklet(unsigned long data)
 						 + 12));
 
 	if (tim_ie) {
-		short_beacon = (tim_ie[2] != 0);
+		short_beacon = (tim_ie[2] != long_beacon_dtim_count);
 		if (tim_ie[2] == 0)
 			mors_vif->dtim_count = 0;
 	}
 
 	if (mors_vif->ecsa_chan_configured) {
 		short_beacon = false;
-		MORSE_DBG(mors, "Tx full beacon. dtim_cnt=%d\n",
-			  ((mors_vif->dtim_count + 1) % vif->bss_conf.dtim_period));
+		MORSE_BEACON_DBG(mors, "%s: tx long beacon, dtim count: %d\n",
+					__func__,
+					((mors_vif->dtim_count + 1) % vif->bss_conf.dtim_period));
 	}
 
 	/* IBSS does not support short beacons */
@@ -231,8 +290,8 @@ static void morse_beacon_tasklet(unsigned long data)
 	/* Parse out the original IEs so we can mess with them */
 	if (morse_dot11ah_parse_ies(s1g_beacon_ies, s1g_ies_length, ies_mask) < 0) {
 		kfree_skb(beacon);
-		MORSE_WARN_RATELIMITED(mors,
-				       "Failed parsing beacon information elements\n");
+		MORSE_BEACON_WARN_RATELIMITED(mors, "%s: failed to parse beacon IEs\n",
+									__func__);
 		goto exit;
 	}
 
@@ -290,8 +349,8 @@ static void morse_beacon_tasklet(unsigned long data)
 	s1g_beacon_ies = morse_mac_get_ie_pos(beacon, &s1g_ies_length, &s1g_hdr_length, true);
 	if (!s1g_beacon_ies) {
 		kfree_skb(beacon);
-		MORSE_WARN_RATELIMITED(mors,
-			"Failed to locate Beacon information elements start position or size\n");
+		MORSE_BEACON_WARN_RATELIMITED(mors, "%s: failed to locate beacon IEs\n",
+									__func__);
 		spin_unlock_bh(&mors_vif->vendor_ie.lock);
 		goto exit;
 	}
@@ -347,9 +406,8 @@ static void morse_beacon_tasklet(unsigned long data)
 
 	if (beacon->len >= DOT11AH_1MHZ_MCS0_MAX_BEACON_LENGTH &&
 	    mors_vif->custom_configs->channel_info.pri_bw_mhz == 1) {
-		MORSE_ERR_RATELIMITED(mors,
-				      "S1G beacon is too big for 1MHz bandwidth (%u); dropping\n",
-				      beacon->len);
+		MORSE_BEACON_ERR_RATELIMITED(mors, "%s: S1G beacon too big for 1MHz TX: %u\n",
+									__func__, beacon->len);
 		kfree_skb(beacon);
 		goto exit;
 	}
@@ -359,7 +417,11 @@ static void morse_beacon_tasklet(unsigned long data)
 	    mors->custom_configs.channel_info.op_bw_mhz :
 	    mors->custom_configs.channel_info.pri_bw_mhz;
 	morse_beacon_fill_tx_info(mors, &tx_info, beacon, mors_vif, tx_bw_mhz);
-	morse_skbq_skb_tx(mq, &beacon, &tx_info, MORSE_SKB_CHAN_BEACON);
+	if (morse_is_time_critical_beacon(mors_vif, ies_mask))
+		morse_skbq_skb_tx(mq, &beacon, &tx_info,
+				MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON);
+	else
+		morse_skbq_skb_tx(mq, &beacon, &tx_info, MORSE_SKB_CHAN_BEACON);
 
 	/* TODO: currently due to the way we implement firmware beaconing,
 	 * these might still get sent before the DTIM beacon.
@@ -401,7 +463,7 @@ int morse_beacon_irq_enable(struct morse_vif *mors_vif, bool enable)
 	u8 beacon_irq_num = MORSE_INT_BEACON_BASE_NUM + mors_vif->id;
 
 	if (mors_vif->id > mors->max_vifs) {
-		MORSE_ERR(mors, "%s: invalid interface id:%d\n", __func__, mors_vif->id);
+		MORSE_BEACON_ERR(mors, "%s: invalid interface id:%d\n", __func__, mors_vif->id);
 		return -1;
 	}
 
@@ -410,7 +472,8 @@ int morse_beacon_irq_enable(struct morse_vif *mors_vif, bool enable)
 	else
 		clear_bit(beacon_irq_num, &beacon_irqs_enabled);
 
-	MORSE_DBG(mors, "%s: irq:%lx id:%d\n", __func__, beacon_irqs_enabled, mors_vif->id);
+	MORSE_BEACON_DBG(mors, "%s: irq:%lx id:%d\n",
+					__func__, beacon_irqs_enabled, mors_vif->id);
 
 	return morse_hw_irq_enable(mors, beacon_irq_num, enable);
 }
@@ -419,6 +482,16 @@ int morse_beacon_init(struct morse_vif *mors_vif)
 {
 	struct morse *mors = morse_vif_to_morse(mors_vif);
 	int ret;
+
+	if (enable_short_bcn_as_dtim_override >= 0) {
+		MORSE_WARN(mors, "%s: overriding default enable_short_bcn_as_dtim: %s to %s\n",
+			   __func__,
+			   mors->cfg->enable_short_bcn_as_dtim ? "true" : "false",
+			   enable_short_bcn_as_dtim_override ? "true" : "false");
+		enable_short_bcn_as_dtim = enable_short_bcn_as_dtim_override;
+	} else {
+		enable_short_bcn_as_dtim = mors->cfg->enable_short_bcn_as_dtim;
+	}
 
 	tasklet_init(&mors_vif->beacon_tasklet, morse_beacon_tasklet, (unsigned long)mors_vif);
 

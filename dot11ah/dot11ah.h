@@ -411,6 +411,8 @@ struct dot11ah_update_rx_beacon_vals {
 	__le16 bcn_int;
 	u8 tim_len;
 	const u8 *tim_ie;
+	u8 cssid_ies_len;
+	u8 *cssid_ies;
 };
 
 struct s1g_operation_params_expanded {
@@ -597,9 +599,6 @@ bool morse_dot11ah_find_s1g_caps_for_bssid(u8 *bssid, struct ieee80211_s1g_cap *
 
 bool morse_dot11ah_find_bss_bw(u8 *bssid, u8 *fc_bss_bw_subfield);
 
-bool morse_dot11ah_find_s1g_operation_for_ssid(const char *ssid, size_t ssid_len,
-					       struct s1g_operation_parameters *params);
-
 /**
  * morse_dot11ah_prim_1mhz_channel_loc_to_idx() - Convert primary 1MHz channel number to 1MHz index
  * @op_bw_mhz: Operating bandwidth of the BSS
@@ -651,16 +650,14 @@ int morse_dot11ah_s1g_chan_to_5g_chan(int chan_s1g);
 u32 morse_dot11ah_channel_get_flags(int chan_s1g);
 
 /**
- * morse_dot11ah_find_cssid() - Find the cssid list entry matching with given cssid.
- * @cssid: the cssid to find
+ * morse_dot11ah_find_cssid_item_for_bssid() - Find the cssid list entry matching with given bssid.
+ * @bssid: bssid for the item to find
  *
  * Use of this function and any returned items must be protected with cssid_list_lock
- * Please pass cssid generated from bssid while using morse_dot11ah_find_cssid for mesh networks.
- * Otherwise, it is preferred to use morse_dot11ah_find_bssid to fetch cssid entry.
  *
- * Return: the cssid list entry if entry with matching cssid found.
+ * Return: the cssid list entry if entry with matching bssid found, NULL otherwise.
  */
-struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid(u32 cssid);
+struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid_item_for_bssid(const u8 bssid[ETH_ALEN]);
 
 struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN]);
 
@@ -672,13 +669,12 @@ struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN]);
  * @s1g_ies_len: length of the S1G information elements.
  * @bssid: identifier of the BSS network.
  *
- * Stores BSS information and S1G IEs by creating unique identifier i.e, cssid
- * from BSSID for mesh networks or from SSID IE for other type of networks.
- *
- * Return: cssid of the BSS network.
+ * Stores BSS information and S1G IEs for each BSS network, if its not already
+ * stored. Each stored item is found by searching the integer value of BSSID,
+ * which is expectd to be always non-NULL
  */
-u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
-			      int s1g_ies_len, u8 *bssid);
+void morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
+			      int s1g_ies_len, const u8 *bssid);
 
 int morse_dot11ah_parse_ies(u8 *start, size_t len, struct dot11ah_ies_mask *ies_mask);
 

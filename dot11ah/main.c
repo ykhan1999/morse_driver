@@ -77,12 +77,13 @@ static bool morse_dot11ah_cssid_has_expired(struct morse_dot11ah_cssid_item *ite
 /*
  * Public functions used in  dot11ah module
  */
-struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid(u32 cssid)
+struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid_item_for_bssid(const u8 bssid[ETH_ALEN])
 {
 	struct morse_dot11ah_cssid_item *item, *tmp;
+	u64 bssid_64 = mac2uint64(bssid);
 
 	list_for_each_entry_safe(item, tmp, &cssid_list, list) {
-		if (item->cssid == cssid) {
+		if (mac2uint64(item->bssid) == bssid_64) {
 			item->last_seen = jiffies;
 			return item;
 		}
@@ -114,8 +115,8 @@ struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN])
 	return NULL;
 }
 
-u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
-			      int s1g_ies_len, u8 *bssid)
+void morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
+			      int s1g_ies_len, const u8 *bssid)
 {
 	/**
 	 * Kernel allocations in this function must be atomic as it occurs
@@ -125,27 +126,19 @@ u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info,
 	u32 cssid = 0;
 	int length;
 	const u8 *ssid;
-	bool mesh_beacon = false;
+	u8 network_id_eid;
 
-	if (morse_is_mesh_network(ies_mask)) {
-		/* Use source addr for mesh networks as different mesh STAs beacon with same
-		 * MESH ID
-		 */
-		cssid = ~crc32(~0, bssid, ETH_ALEN);
-		/* Store mesh id in ssid field of cssid entry for mesh beacons */
-		ssid = ies_mask->ies[WLAN_EID_MESH_ID].ptr;
-		length = ies_mask->ies[WLAN_EID_MESH_ID].len;
-		mesh_beacon = true;
-	} else {
-		/* In Linux we have to pass ~0 as the seed value, and then invert the outcome */
-		cssid = ~crc32(~0, ies_mask->ies[WLAN_EID_SSID].ptr,
-			       ies_mask->ies[WLAN_EID_SSID].len);
-		ssid = ies_mask->ies[WLAN_EID_SSID].ptr;
-		length = ies_mask->ies[WLAN_EID_SSID].len;
-	}
+	if (WARN_ON(!bssid))
+		return;
+
+	network_id_eid = morse_is_mesh_network(ies_mask) ? WLAN_EID_MESH_ID : WLAN_EID_SSID;
+	cssid = morse_generate_cssid(ies_mask->ies[network_id_eid].ptr,
+		ies_mask->ies[network_id_eid].len);
+	ssid = ies_mask->ies[network_id_eid].ptr;
+	length = ies_mask->ies[network_id_eid].len;
 
 	spin_lock_bh(&cssid_list_lock);
-	stored = morse_dot11ah_find_cssid(cssid);
+	stored = morse_dot11ah_find_cssid_item_for_bssid(bssid);
 
 	if (stored) {
 		if (stored->capab_info != capab_info && capab_info != 0)
@@ -163,11 +156,10 @@ u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info,
 			stored->ies_len = s1g_ies_len;
 		}
 
-		if (bssid)
-			memcpy(stored->bssid, bssid, ETH_ALEN);
+		memcpy(stored->bssid, bssid, ETH_ALEN);
 
 		spin_unlock_bh(&cssid_list_lock);
-		return cssid;
+		return;
 	}
 
 	item = kmalloc(sizeof(*item), GFP_ATOMIC);
@@ -179,8 +171,8 @@ u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info,
 	item->last_seen = jiffies;
 	item->capab_info = capab_info;
 	item->fc_bss_bw_subfield = MORSE_FC_BSS_BW_INVALID;
+	item->mesh_beacon = (network_id_eid == WLAN_EID_MESH_ID);
 	memcpy(item->ssid, ssid, length);
-	item->mesh_beacon = mesh_beacon;
 
 	item->ies = kmalloc(s1g_ies_len, GFP_ATOMIC);
 	if (!item->ies) {
@@ -191,56 +183,12 @@ u32 morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info,
 	item->ies_len = s1g_ies_len;
 
 	memcpy(item->ies, s1g_ies, s1g_ies_len);
-
-	if (bssid)
-		memcpy(item->bssid, bssid, ETH_ALEN);
-	else
-		memset(item->bssid, 0, ETH_ALEN);
+	memcpy(item->bssid, bssid, ETH_ALEN);
 
 	list_add(&item->list, &cssid_list);
 
 exit:
 	spin_unlock_bh(&cssid_list_lock);
-
-	return cssid;
-}
-
-bool morse_dot11ah_find_s1g_operation_for_ssid(const char *ssid, size_t ssid_len,
-					       struct s1g_operation_parameters *params)
-{
-	struct morse_dot11ah_cssid_item *item = NULL;
-	u8 *ies = NULL;
-	u32 cssid = ~crc32(~0, ssid, ssid_len);
-	bool found = false;
-
-	spin_lock_bh(&cssid_list_lock);
-	item = morse_dot11ah_find_cssid(cssid);
-
-	if (item) {
-		ies = (u8 *)morse_dot11_find_ie(WLAN_EID_S1G_OPERATION, item->ies, item->ies_len);
-		if (ies) {
-			u8 prim_chan_num = ies[4];
-			u8 chan_loc = IEEE80211AH_S1G_OPERATION_GET_PRIM_CHAN_LOC(ies[2]);
-
-			params->chan_centre_freq_num = ies[5];
-			params->op_bw_mhz =
-				IEEE80211AH_S1G_OPERATION_GET_OP_CHAN_BW(ies[2]);
-			params->pri_bw_mhz =
-				IEEE80211AH_S1G_OPERATION_GET_PRIM_CHAN_BW(ies[2]);
-			params->pri_1mhz_chan_idx =
-				morse_dot11ah_prim_1mhz_chan_loc_to_idx(params->op_bw_mhz,
-					params->pri_bw_mhz,
-					prim_chan_num, params->chan_centre_freq_num,
-					chan_loc);
-
-			params->s1g_operating_class = ies[3];
-
-			found = true;
-		}
-	}
-
-	spin_unlock_bh(&cssid_list_lock);
-	return found;
 }
 
 /*
@@ -368,28 +316,13 @@ EXPORT_SYMBOL(morse_dot11ah_find_bss_bw);
 
 bool morse_dot11ah_is_mesh_peer_known(const u8 *peer_mac_addr)
 {
-	struct morse_dot11ah_cssid_item *item, *tmp;
-	u32 cssid;
 	bool ret = false;
 
 	if (!peer_mac_addr)
 		return false;
 
-	cssid = ~crc32(~0, peer_mac_addr, ETH_ALEN);
 	spin_lock_bh(&cssid_list_lock);
-	list_for_each_entry_safe(item, tmp, &cssid_list, list) {
-		if (item->cssid == cssid) {
-			/* Check if entry has expired */
-			if (morse_dot11ah_cssid_has_expired(item)) {
-				list_del(&item->list);
-				kfree(item->ies);
-				kfree(item);
-			} else {
-				ret = true;
-			}
-			break;
-		}
-	}
+	ret = morse_dot11ah_find_cssid_item_for_bssid(peer_mac_addr);
 	spin_unlock_bh(&cssid_list_lock);
 
 	return ret;
@@ -403,7 +336,7 @@ bool morse_dot11ah_add_mesh_peer(struct dot11ah_ies_mask *ies_mask, u16 capab_in
 		return false;
 
 	/* Create entry for this new mesh peer */
-	morse_dot11ah_store_cssid(ies_mask, capab_info, NULL, 0, (u8 *)peer_mac_addr);
+	morse_dot11ah_store_cssid(ies_mask, capab_info, NULL, 0, peer_mac_addr);
 
 	return true;
 }
@@ -411,27 +344,16 @@ EXPORT_SYMBOL(morse_dot11ah_add_mesh_peer);
 
 bool morse_dot11ah_del_mesh_peer(const u8 *peer_mac_addr)
 {
-	struct morse_dot11ah_cssid_item *item, *tmp;
-	u32 cssid;
+	bool ret = false;
 
 	if (!peer_mac_addr)
 		return false;
 
-	/* Use peer mac addr for mesh, as all mesh STAs will use the same MESH ID */
-	cssid = ~crc32(~0, peer_mac_addr, ETH_ALEN);
 	spin_lock_bh(&cssid_list_lock);
-	/* Free matching entry */
-	list_for_each_entry_safe(item, tmp, &cssid_list, list) {
-		if (item->cssid == cssid) {
-			list_del(&item->list);
-			kfree(item->ies);
-			kfree(item);
-			spin_unlock_bh(&cssid_list_lock);
-			return true;
-		}
-	}
+	ret = morse_dot11ah_find_cssid_item_for_bssid(peer_mac_addr);
 	spin_unlock_bh(&cssid_list_lock);
-	return false;
+
+	return ret;
 }
 EXPORT_SYMBOL(morse_dot11ah_del_mesh_peer);
 

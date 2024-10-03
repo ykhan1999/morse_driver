@@ -124,6 +124,7 @@ enum morse_commands_id {
 	MORSE_COMMAND_PV1_HC_INFO_UPDATE = 0x0041,
 	MORSE_COMMAND_PV1_SET_RX_AMPDU_STATE = 0x0042,
 	MORSE_COMMAND_CONFIGURE_PAGE_SLICING = 0x0043,
+	MORSE_COMMAND_HW_SCAN = 0x0044,
 
 
 	/* Temporary Commands that may be removed later */
@@ -171,6 +172,9 @@ enum morse_commands_id {
 	MORSE_COMMAND_EVT_SCAN_RESULT = 0x4008,
 	MORSE_COMMAND_EVT_CONNECTED = 0x4009,
 	MORSE_COMMAND_EVT_DISCONNECTED = 0x4010,
+	MORSE_COMMAND_EVT_HW_SCAN_DONE = 0x4011,
+	MORSE_COMMAND_EVT_CHANNEL_USAGE = 0x4012,
+	MORSE_COMMAND_EVT_CONNECTION_LOSS = 0x4013,
 
 	/** Test commands start at 0x8000 */
 	MORSE_TEST_COMMAND_START_SAMPLEPLAY = 0x8002,
@@ -617,6 +621,20 @@ struct morse_evt_connected {
 
 struct morse_evt_disconnected {
 	struct morse_cmd_header hdr;
+} __packed;
+
+struct morse_evt_channel_usage {
+	struct morse_cmd_header hdr;
+	u64 time_listen;
+	u64 busy_time;
+	u32 freq_hz;
+	s8 noise;
+	u8 bw_mhz;
+} __packed;
+
+struct morse_evt_connection_loss {
+	struct morse_cmd_header hdr;
+	u32 reason;
 } __packed;
 
 enum morse_cmd_raw_tlv_tag {
@@ -1158,6 +1176,21 @@ struct morse_cmd_set_frag_threshold_cfm {
 	u32 frag_threshold;
 } __packed;
 
+enum morse_cmd_hw_scan_config_flags {
+	MORSE_HW_SCAN_CMD_FLAGS_START		= BIT(0),
+	MORSE_HW_SCAN_CMD_FLAGS_ABORT		= BIT(1),
+	MORSE_HW_SCAN_CMD_FLAGS_SURVEY		= BIT(2),
+	MORSE_HW_SCAN_CMD_FLAGS_STORE		= BIT(3),
+	MORSE_HW_SCAN_CMD_FLAGS_1MHZ_PROBES = BIT(4),
+};
+
+struct morse_cmd_hw_scan_req {
+	struct morse_cmd_header hdr;
+	u32 flags;
+	u32 dwell_time_ms;
+	u8 variable[];
+} __packed;
+
 /**
  * Mesh Opcode for configuring the current state to firmware
  */
@@ -1384,6 +1417,17 @@ int morse_cmd_pv1_set_rx_ampdu_state(struct morse_vif *mors_vif, u8 *sta_addr, u
  * Return: 0 on success, else error code
  */
 int morse_cmd_configure_page_slicing(struct morse_vif *mors_vif, bool enable);
+
+/**
+ * morse_cmd_hw_scan() - Configure HW scanning
+ *
+ * @mors: Morse structure
+ * @params: HW scan parameters
+ * @store: Whether to save the HW scan configuration in chip (for standby mode)
+ *
+ * Return: 0 on success, else error code
+ */
+int morse_cmd_hw_scan(struct morse *mors, struct morse_hw_scan_params *params, bool store);
 
 
 #endif /* !_MORSE_COMMAND_H_ */
