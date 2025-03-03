@@ -97,6 +97,11 @@
 	((device_id) & 0xff)
 #define MORSE_DEVICE_GET_CHIP_REV(device_id) \
 	((((device_id) >> 8) & 0xf))
+#define MORSE_DEVICE_GET_CHIP_TYPE(device_id) \
+	((((device_id) >> 12) & 0xf))
+
+#define MORSE_DEVICE_TYPE_IS_FPGA(device_id) \
+	(MORSE_DEVICE_GET_CHIP_TYPE(device_id) == CHIP_TYPE_FPGA)
 
 #define HZ_TO_KHZ(x) ((x) / 1000)
 #define KHZ_TO_HZ(x) ((x) * 1000)
@@ -287,6 +292,16 @@ enum morse_rc_method {
 	MORSE_RC_METHOD_MMRC = 2,
 };
 
+/* non-TIM mode status */
+enum morse_non_tim_mode {
+	/** Indicates that non-TIM mode is disabled */
+	NON_TIM_MODE_DISABLED,
+	/** Used in AP mode to keep track STAs requesting non-TIM mode */
+	NON_TIM_MODE_REQUESTED,
+	/** Indicates that AP has allowed STA to enter non-TIM mode */
+	NON_TIM_MODE_ENABLED
+};
+
 /**
  * struct morse_vendor_info - filled from mm vendor IE
  */
@@ -349,7 +364,13 @@ struct morse_sta {
 	struct mmrc_rate last_sta_rx_rate;
 #endif
 	/** RX status of last rx skb */
-	struct morse_skb_rx_status last_rx_status;
+	struct {
+		bool is_data_set;
+		bool is_mgmt_set;
+		struct morse_skb_rx_status data_status;
+		struct morse_skb_rx_status mgmt_status;
+	} last_rx;
+
 	/** average rssi of rx packets */
 	s16 avg_rssi;
 	/** When set, frames destined for this STA must be returned to mac80211
@@ -375,6 +396,14 @@ struct morse_sta {
 
 	/** Last received S1G protected action PN */
 	u64 last_rx_mgmt_pn;
+
+	/** non-TIM mode negotiated between AP & STA */
+	enum morse_non_tim_mode non_tim_mode_status;
+
+	/** This is the 1st byte of S1G capabilities IE, stored to retrieve STA's short GI
+	 *  capabilities and supported channel width.
+	 */
+	u8 s1g_cap0;
 };
 
 /** Number of bits in AID bitmap.
@@ -493,6 +522,15 @@ struct morse_mesh_config_list {
 	spinlock_t lock;
 };
 
+/**
+ * enum morse_sme_state_flags - VIF state flags in fullmac mode.
+ */
+enum morse_sme_state_flags {
+	/** @MORSE_SME_STATE_CONNECTING: Connection request is in progress. */
+	MORSE_SME_STATE_CONNECTING,
+	/** @MORSE_SME_STATE_CONNECTED: Connection is established. */
+	MORSE_SME_STATE_CONNECTED,
+};
 
 struct morse_vif {
 	u16 id;			/* interface ID from chip */
@@ -748,10 +786,26 @@ struct morse_vif {
 	u32 mcast_tx_rate_throughput;
 
 	/**
+	 * User configuration of non-TIM mode.
+	 */
+	bool enable_non_tim_mode;
+
+	/**
 	 *  Work to evaluate the tx rate to use for multicast packets transmission.
 	 */
 	struct delayed_work mcast_tx_rate_work;
 
+	/**
+	 * FullMAC device parameters.
+	 */
+	struct wireless_dev wdev;
+	struct net_device *ndev;
+
+	/**
+	 * @sme_state: Bit field of state flags in fullmac mode.
+	 *             See &enum morse_sme_state_flags for bit numbers.
+	 */
+	unsigned long sme_state;
 };
 
 struct morse_debug {
@@ -925,6 +979,11 @@ struct morse {
 	/* wiphy device registered with cfg80211 */
 	struct wiphy *wiphy;
 
+	/** @scan_req: pointer to the current scan request which is in progress,
+	 * or NULL if no scan is in progress (fullmac only).
+	 */
+	struct cfg80211_scan_request *scan_req;
+
 	/* Extra padding to insert at the start of each tx packet */
 	u8 extra_tx_offset;
 
@@ -977,11 +1036,21 @@ struct morse {
 
 	int enable_subbands;
 
+	/* Wait queue to wait for beacon tasklet execution */
+	wait_queue_head_t beacon_tasklet_waitq;
+
+	/**
+	 * Condition to wait for beacon tasklet execution. Beacon tasklet sets this bool
+	 * to true after queueing beacon in the skbq.
+	 */
+	bool beacon_queued;
+
 	/* Chip interface variables */
 	struct morse_chip_if_state *chip_if;
 	/* Work queue used by code directly talking to the chip */
 	struct workqueue_struct *chip_wq;
 	struct work_struct chip_if_work;
+	struct work_struct usb_irq_work;
 
 	/* Used to periodically check for stale tx skbs */
 	struct morse_stale_tx_status stale_status;
@@ -1069,8 +1138,21 @@ struct morse {
 	/* Kernel time of last HW stop event */
 	time64_t last_hw_stop;
 
-	/** The bandwidth of the last received probe request */
-	u8 last_probe_req_bw_mhz;
+	/* Number of AP interfaces */
+	u8 num_of_ap_interfaces;
+
+	/** Tracking of STAs yet to join the BSS (if ap-type interfaces are active) */
+	struct {
+		/** See @ref morse_pre_assoc_peer */
+		struct list_head list;
+		/** Protect access to list */
+		spinlock_t lock;
+		/**
+		 * A counter tracking the number of ifaces using this list
+		 * (used for station record clearing).
+		 */
+		int n_ifaces_using;
+	} pre_assoc_peers;
 
 	/* must be last */
 	u8 drv_priv[] __aligned(sizeof(void *));
@@ -1128,6 +1210,10 @@ int __init morse_spi_init(void);
 void __exit morse_spi_exit(void);
 #endif
 
+#ifdef CONFIG_MORSE_USB
+int __init morse_usb_init(void);
+void __exit morse_usb_exit(void);
+#endif
 
 static inline bool morse_is_data_tx_allowed(struct morse *mors)
 {
@@ -1232,9 +1318,6 @@ void morse_ndp_probe_req_resp_finish(struct morse_vif *mors_vif);
  * @status:	NDP probe request IRQ status
  */
 void morse_ndp_probe_req_resp_irq_handle(struct morse *mors, u32 status);
-
-void morse_sdio_set_irq(struct morse *mors, bool enable);
-
 int morse_send_probe_req_enable(struct ieee80211_vif *vif, bool enable);
 int morse_send_probe_req_init(struct ieee80211_vif *vif);
 void morse_send_probe_req_finish(struct ieee80211_vif *vif);
@@ -1254,6 +1337,19 @@ void morse_mac_schedule_probe_req(struct ieee80211_vif *vif);
  */
 bool morse_mac_is_s1g_long_beacon(struct morse *mors, struct sk_buff *skb);
 
+/**
+ * morse_usb_ndr_reset - Performs non-destructive reset through Morse USB.
+ *
+ * @note: A non-destructive reset is the same as a digital reset except that USB
+ * connection is maintained, meaning that re-enumeration is not required.
+ * USB must be already enumerated and able to communicate as this sends a custom
+ * USB message to the chip.
+ *
+ * @mors: Global morse struct
+ *
+ * Return: 0 on success, else error code
+ */
+int morse_usb_ndr_reset(struct morse *mors);
 int morse_survey_add_channel_usage(struct morse *mors, struct morse_survey_rx_usage_record *record);
 int morse_survey_init_usage_records(struct morse *mors);
 

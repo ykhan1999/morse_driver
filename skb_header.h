@@ -43,6 +43,7 @@
  * @MORSE_TX_STATUS_DUTY_CYCLE_CANT_SEND: This frame couldn't be sent due to
  *                                        duty cycle restrictions.
  * @MORSE_TX_CONF_HAS_PV1_BPN_IN_BODY: The frame contains a PV1 BPN for TX CCMP derivation
+ * @MORSE_TX_CONF_FLAGS_SEND_AFTER_DTIM: Do not send until after the next DTIM beacon
  *
  * NOTE: Because morse_skb_tx_rx_info is treated as a union the following
  *       bit fields cannot overlap.
@@ -61,6 +62,7 @@ enum morse_tx_status_and_conf_flags {
 	MORSE_TX_CONF_NO_PS_BUFFER = (BIT(18)),
 	MORSE_TX_STATUS_DUTY_CYCLE_CANT_SEND = (BIT(19)),
 	MORSE_TX_CONF_HAS_PV1_BPN_IN_BODY = (BIT(21)),
+	MORSE_TX_CONF_FLAGS_SEND_AFTER_DTIM = (BIT(22)),
 	MORSE_TX_CONF_FLAGS_IMMEDIATE_REPORT = (BIT(31))
 };
 
@@ -126,6 +128,7 @@ enum morse_rx_status_flags {
  *                             (i.e. command response or tx status)
  * @MORSE_SKB_CHAN_BEACON: Payload is a beacon
  * @MORSE_SKB_CHAN_MGMT: Payload is a management frame
+ * @MORSE_SKB_CHAN_WIPHY: Payload is an 802.3 frame for fullmac firmware
  * @MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON: Internal channel for timing critical
  * beacons. These frames will be sent to the chip first, and will be sent on
  * MORSE_SKB_CHAN_BEACON target.

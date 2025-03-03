@@ -121,6 +121,9 @@ static void morse_twt_update_params(struct ieee80211_twt_params *params,
 		params->min_twt_dur = wake_duration_us / TWT_WAKE_DUR_UNIT_256;
 }
 
+/* Purging an event must not modify shared twt structure state. Spin lock does not need to be
+ * held.
+ */
 static void morse_twt_purge_event(struct morse *mors, struct morse_twt_event *event)
 {
 	if (!event)
@@ -142,12 +145,19 @@ static void morse_twt_queue_purge(struct morse *mors,
 	struct morse_twt_event *temp;
 	struct morse_twt_event *event;
 
-	if (!qhead)
+	if (!qhead || (!addr && !flow_id))
 		return;
 
 	list_for_each_entry_safe(event, temp, qhead, list) {
-		if ((!addr || ether_addr_equal(event->addr, addr)) &&
-		    (!flow_id || (*flow_id == event->flow_id)))
+		bool remove = true;
+
+		if (addr)
+			remove &= ether_addr_equal(event->addr, addr);
+
+		if (flow_id)
+			remove &= (*flow_id == event->flow_id);
+
+		if (remove)
 			morse_twt_purge_event(mors, event);
 	}
 }
@@ -366,7 +376,6 @@ static int morse_mac_send_twt_action_frame(struct morse *mors,
 	rcu_read_lock();
 	sta = ieee80211_find_sta_by_ifaddr(mors->hw, dest_addr, vif->addr);
 	if (!sta) {
-		MORSE_ERR(mors, "%s: Couldn't find dest STA\n", __func__);
 		rcu_read_unlock();
 		ret = -EINVAL;
 		goto exit;
@@ -419,7 +428,8 @@ static int morse_mac_send_twt_action_frame(struct morse *mors,
 		 */
 		rcu_read_unlock();
 		IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_STAT_TX_FILTERED;
-		ieee80211_tx_status(mors->hw, skb);
+		MORSE_IEEE80211_TX_STATUS(mors->hw, skb);
+
 		return 0;
 	}
 
@@ -1321,12 +1331,17 @@ void morse_twt_process_pending_cmds(struct morse *mors, struct morse_vif *mors_v
 	struct morse_twt_event *event;
 	struct morse_twt_event *temp;
 	struct morse_twt *twt = &mors_vif->twt;
+	struct list_head to_process;
 
+	/* Move STA vif eventq into local queue, so operations can occur outside of the spin lock.
+	 * Events will require chip communication which must occur in a non-blocking context.
+	 */
+	INIT_LIST_HEAD(&to_process);
 	spin_lock_bh(&twt->lock);
-	list_for_each_entry_safe(event, temp, &twt->sta_vif.to_install_uninstall, list) {
-		/* Must unlock as we are sending a command which blocks */
-		spin_unlock_bh(&twt->lock);
+	list_splice_init(&twt->sta_vif.to_install_uninstall, &to_process);
+	spin_unlock_bh(&twt->lock);
 
+	list_for_each_entry_safe(event, temp, &to_process, list) {
 		if (event->type == MORSE_TWT_EVENT_TEARDOWN) {
 			if (!morse_twt_uninstall_agreement(mors, mors_vif, event->flow_id)) {
 				/* Clear active TWT agr flag */
@@ -1351,12 +1366,9 @@ void morse_twt_process_pending_cmds(struct morse *mors, struct morse_vif *mors_v
 			MORSE_TWT_WARN(mors, "Invalid TWT event type :%d\n", event->type);
 		}
 
-		spin_lock_bh(&twt->lock);
-
 		/* Cleanup event. */
 		morse_twt_purge_event(mors, event);
 	}
-	spin_unlock_bh(&twt->lock);
 }
 
 void morse_twt_queue_event(struct morse *mors,
@@ -1960,7 +1972,7 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 	return 0;
 }
 
-void morse_twt_handle_cmd_work(struct work_struct *work)
+static void morse_twt_handle_cmd_work(struct work_struct *work)
 {
 	struct morse_twt_sta_vif *twt_sta_vif = container_of(work,
 			struct morse_twt_sta_vif, cmd_work);

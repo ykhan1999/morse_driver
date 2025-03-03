@@ -67,6 +67,11 @@ static int __init morse_init(void)
 		pr_err("morse_spi_failed() failed: %d\n", ret);
 #endif
 
+#ifdef CONFIG_MORSE_USB
+	ret = morse_usb_init();
+	if (ret)
+		pr_err("morse_usb_failed() failed: %d\n", ret);
+#endif
 
 	return ret;
 }
@@ -80,6 +85,9 @@ static void __exit morse_exit(void)
 	morse_spi_exit();
 #endif
 
+#ifdef CONFIG_MORSE_USB
+	morse_usb_exit();
+#endif
 }
 
 module_init(morse_init);

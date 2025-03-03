@@ -180,22 +180,22 @@ struct morse_pv1_hc_request {
 /**
  * struct morse_pv1 - Contains PV1 state and configuration information
  *
- * @tx_request:    Header Compresion Request context at TX
- * @rx_request:    Header Compresion Request context at RX
+ * @tx_request:          Header Compresion Request context at TX
+ * @rx_request:          Header Compresion Request context at RX
  * @fw_stored_response_status:  Flag to track storage status in firmware
- * @rx_pv1_sta:    STA context for which Header Compression Request is received
- * @tx_pv1_sta:    STA context for which Header Compression Request is send
- * @hc_req_work:   Work queue to process PV1 Header Compression Request
- * @hc_resp_work:  Work queue to process PV1 Header Compression Response
+ * @rx_pv1_sta_addr:     STA for which Header Compression Request is received
+ * @tx_pv1_sta_addr:     STA for which Header Compression Request is sent
+ * @hc_req_work:         Work queue to process PV1 Header Compression Request
+ * @hc_resp_work:        Work queue to process PV1 Header Compression Response
  * @hc_response_timeout: Timeout value to keep track RX of Header Compression Response
- * @lock:          Mutex used to control access to lists/memory
+ * @lock:                Mutex used to control access to lists/memory
  */
 struct morse_pv1 {
 	struct morse_pv1_hc_request tx_request;
 	struct morse_pv1_hc_request rx_request;
 	bool fw_stored_response_status;
-	struct ieee80211_sta *rx_pv1_sta;
-	struct ieee80211_sta *tx_pv1_sta;
+	u8 rx_pv1_sta_addr[ETH_ALEN];
+	u8 tx_pv1_sta_addr[ETH_ALEN];
 	struct work_struct hc_req_work;
 	struct work_struct hc_resp_work;
 	u32 hc_response_timeout;
@@ -249,12 +249,11 @@ void morse_pv1_a3_a4_check(struct morse_vif *mors_vif, struct ieee80211_sta *pub
  * @mors:        The global Morse structure
  * @vif:         Valid VIF on which action frame gets transmitted
  * @sta:         Peer STA to which action frame is being transmitted
- * @no_hwcrypt:  HW crypto enabled flag
  * @skb_data:    Data SKB
  * @is_response: Header Compression request/response
  */
 void morse_mac_send_pv1_hc_action_frame(struct morse *mors, struct ieee80211_vif *vif,
-						struct ieee80211_sta *sta, int no_hwcrypt,
+						struct ieee80211_sta *sta,
 						struct sk_buff *skb_data, bool is_response);
 
 /**
@@ -294,13 +293,6 @@ void mors_pv1_init_vif(struct morse_vif *mors_vif);
 void morse_pv1_finish_vif(struct morse_vif *mors_vif);
 
 /**
- * morse_pv1_process_hc_req_work - Header Compression request workqueue handler
- *
- * @work:    Workqueue struct
- */
-void morse_pv1_process_hc_req_work(struct work_struct *work);
-
-/**
  * morse_mac_convert_pv0_to_pv1 - Convert PV0 to PV1 frame
  *
  * @mors:    The global Morse structure
@@ -311,7 +303,7 @@ void morse_pv1_process_hc_req_work(struct work_struct *work);
  * @return: 0 on success, error on failure
  */
 int morse_mac_convert_pv0_to_pv1(struct morse *mors, struct morse_vif *mors_vif,
-		struct ieee80211_sta *sta, struct sk_buff *skb, int no_hwcrypt);
+		struct ieee80211_sta *sta, struct sk_buff *skb);
 
 /**
  * morse_mac_convert_pv1_to_pv0 - Replaces PV1 MAC Header with PV0 Header of Qos Data

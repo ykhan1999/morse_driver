@@ -8,7 +8,7 @@ else
 endif
 
 # Set 0 to a version number. This is done to match the Linux expectations
-override MORSE_VERSION = "0-rel_1_13_3_2024_Nov_11"
+override MORSE_VERSION = "0-rel_1_14_1_2024_Dec_05"
 
 USING_CLANG := $(shell $(CC) -v 2>&1 | grep -c "clang version")
 
@@ -22,20 +22,17 @@ ccflags-y += "-DMORSE_VERSION=$(MORSE_VERSION)"
 ccflags-y += -I$(KERNEL_SRC)
 ccflags-$(CONFIG_MORSE_SDIO) += "-DCONFIG_MORSE_SDIO"
 ccflags-$(CONFIG_MORSE_SPI) += "-DCONFIG_MORSE_SPI"
+ccflags-$(CONFIG_MORSE_USB) += "-DCONFIG_MORSE_USB"
 ccflags-$(CONFIG_MORSE_VENDOR_COMMAND) += "-DCONFIG_MORSE_VENDOR_COMMAND"
 ccflags-$(CONFIG_MORSE_DEBUGFS) += "-DCONFIG_MORSE_DEBUGFS"
 ccflags-$(CONFIG_MORSE_ENABLE_TEST_MODES) += "-DCONFIG_MORSE_ENABLE_TEST_MODES"
 ccflags-$(CONFIG_MORSE_HW_TRACE) += "-DCONFIG_MORSE_HW_TRACE"
 ccflags-$(CONFIG_MORSE_DEBUG_IRQ) += "-DCONFIG_MORSE_DEBUG_IRQ"
 ccflags-$(CONFIG_MORSE_DEBUG_TXSTATUS) += "-DCONFIG_MORSE_DEBUG_TXSTATUS"
-
-ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
-	ccflags-y += "-DCONFIG_MORSE_RC"
-	ccflags-y += "-I$(src)/mmrc"
-endif
-
 ccflags-$(CONFIG_MORSE_IPMON) += "-DCONFIG_MORSE_IPMON"
 ccflags-$(CONFIG_MORSE_MONITOR) += "-DCONFIG_MORSE_MONITOR"
+ccflags-$(CONFIG_MORSE_PAGESET_TRACE) += "-DCONFIG_MORSE_PAGESET_TRACE"
+ccflags-$(CONFIG_MORSE_BUS_TRACE) += "-DCONFIG_MORSE_BUS_TRACE"
 
 ifneq ($(CONFIG_BACKPORT_VERSION),)
 # Convert a version string from "vX.Y.Z-stuff" into an integer for comparison with KERNEL_VERSION
@@ -65,6 +62,7 @@ ccflags-y += "-DCONFIG_MORSE_SDIO_ALIGNMENT=$(CONFIG_MORSE_SDIO_ALIGNMENT)"
 
 ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
 	ccflags-y += "-DCONFIG_MORSE_RC"
+	ccflags-y += "-I$(src)/mmrc"
 endif
 
 ifeq ($(CONFIG_MORSE_DHCP_OFFLOAD),y)
@@ -91,6 +89,14 @@ else
 	ccflags-y += "-DENABLE_SURVEY_DEFAULT=1"
 endif
 
+ifeq ($(CONFIG_MORSE_PAGESET_TRACE),y)
+	ccflags-y += "-DPAGESET_TRACE_DEPTH=64"
+endif
+
+ifeq ($(CONFIG_MORSE_BUS_TRACE),y)
+	ccflags-y += "-DBUS_TRACE_DEPTH=64"
+endif
+
 ccflags_trace.o := -I$(src)
 CFLAGS_trace.o := -I$(src)
 
@@ -109,6 +115,7 @@ morse-y += init.o
 morse-y += skbq.o
 morse-y += debug.o
 morse-y += trace.o
+morse-y += mm8108.o
 morse-y += mm6108.o
 morse-y += command.o
 morse-y += hw.o
@@ -124,6 +131,8 @@ morse-y += of.o
 morse-y += firmware.o
 morse-y += pager_if_hw.o
 morse-y += pager_if_sw.o
+morse-y += yaps.o
+morse-y += yaps-hw.o
 morse-y += watchdog.o
 morse-y += event.o
 morse-y += crc16_xmodem.o
@@ -138,12 +147,16 @@ morse-y += page_slicing.o
 morse-y += pv1.o
 morse-y += hw_scan.o
 morse-y += coredump.o
+morse-y += peer.o
 morse-$(CONFIG_MORSE_MONITOR) += monitor.o
 morse-$(CONFIG_MORSE_SDIO) += sdio.o
 morse-$(CONFIG_MORSE_SPI) += spi.o
+morse-$(CONFIG_MORSE_USB) += usb.o
 morse-$(CONFIG_MORSE_VENDOR_COMMAND) += vendor.o
 morse-$(CONFIG_MORSE_USER_ACCESS) += uaccess.o
 morse-$(CONFIG_MORSE_HW_TRACE) += hw_trace.o
+morse-$(CONFIG_MORSE_PAGESET_TRACE) += pageset_trace.o
+morse-$(CONFIG_MORSE_BUS_TRACE) += bus_trace.o
 
 ifeq ($(CONFIG_DISABLE_MORSE_RC),y)
 	morse-y += minstrel_rc.o

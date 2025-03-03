@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
-
+#include <linux/bitops.h>
 #include "pager_if_hw.h"
 #include "bus.h"
 #include "debug.h"
 #include "chip_if.h"
+#include "pageset_trace.h"
 
 /**
  * Set this #define to control whether or not the pager hardware IRQ
@@ -96,11 +97,15 @@ static void morse_pager_hw_cache_pages(struct morse_pager *pager,
 	u32 block = page->addr >> MORSE_PAGER_BITS_BITMAP_LEN;
 
 	aux_data->cache.bitmap[block] = page->addr & ~BIT(MORSE_PAGER_BITS_BITMAP_LEN);
+
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_CACHE_PUT_PAGES,
+		hweight32(aux_data->cache.bitmap[block]));
 }
 
 static int morse_pager_hw_get_page_from_cache(struct morse_pager *pager,
 			      struct morse_page *page)
 {
+	int ret;
 	struct morse_pager_hw_aux_data *aux_data =
 		(struct morse_pager_hw_aux_data *)pager->aux_data;
 	int block;
@@ -111,19 +116,26 @@ static int morse_pager_hw_get_page_from_cache(struct morse_pager *pager,
 			break;
 	}
 
-	if (block >= ARRAY_SIZE(aux_data->cache.bitmap))
-		return -ENOENT;
+	if (block >= ARRAY_SIZE(aux_data->cache.bitmap)) {
+		ret = -ENOENT;
+		goto exit;
+	}
 
 	index = ffs(aux_data->cache.bitmap[block]);
-	if (!index)
-		return -ENOENT;
-
+	if (!index) {
+		ret = -ENOENT;
+		goto exit;
+	}
 	index -= 1;
 
 	aux_data->cache.bitmap[block] &= ~BIT(index);
 
-	return morse_pager_hw_get_page_from_index(pager,
-				(block * MORSE_PAGER_BITS_BITMAP_LEN) + index, page);
+	ret = morse_pager_hw_get_page_from_index(pager,
+		(block * MORSE_PAGER_BITS_BITMAP_LEN) + index, page);
+
+exit:
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_CACHE_GET, (ret) ? 0 : page->addr);
+	return ret;
 }
 
 static int _morse_pager_hw_pop(struct morse_pager *pager,
@@ -139,13 +151,17 @@ static int _morse_pager_hw_pop(struct morse_pager *pager,
 
 	if (!ret) {
 		/* Pager has no pages left */
-		if (pop_val == 0)
-			return -EAGAIN;
+		if (pop_val == 0) {
+			ret = -EAGAIN;
+			goto exit;
+		}
 
 		page->addr = pop_val;
 		page->size_bytes = pager->page_size_bytes;
 	}
 
+exit:
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_POP_PAGE, (ret) ? 0 : page->addr);
 	return ret;
 }
 
@@ -183,6 +199,7 @@ static int _morse_pager_hw_put(struct morse_pager *pager,
 	    (struct morse_pager_hw_aux_data *)pager->aux_data;
 	int ret;
 
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_PUT_PAGE, page->addr);
 	ret = morse_reg32_write(pager->mors, aux_data->put_addr, cpu_to_le32(page->addr));
 
 	if (!ret) {
@@ -212,7 +229,8 @@ static int morse_pager_hw_put(struct morse_pager *pager,
 
 	block = index / MORSE_PAGER_BITS_BITMAP_LEN;
 	aux_data->cache.bitmap[block] |= BIT(index - (block * MORSE_PAGER_BITS_BITMAP_LEN));
-
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_STORE_PAGE_BULK,
+			  BIT(index - (block * MORSE_PAGER_BITS_BITMAP_LEN)));
 	return 0;
 }
 
@@ -231,6 +249,8 @@ static void _morse_pager_hw_notify_pager(const struct morse_pager *pager)
 
 		page.addr = (block << MORSE_PAGER_BITS_BITMAP_LEN) | aux_data->cache.bitmap[block];
 
+		pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_NOTIFY,
+				  hweight32(aux_data->cache.bitmap[block]));
 		_morse_pager_hw_put((struct morse_pager *)pager, &page);
 		aux_data->cache.bitmap[block] = 0;
 	}
@@ -264,8 +284,6 @@ static int morse_pager_hw_page_write(struct morse_pager *pager,
 				     struct morse_page *page, int offset,
 				     const char *buff, int num_bytes)
 {
-	int ret;
-
 	if (offset < 0)
 		return -EINVAL;
 
@@ -275,15 +293,13 @@ static int morse_pager_hw_page_write(struct morse_pager *pager,
 	if (page->addr == 0)
 		return -EFAULT;
 
-	ret = morse_dm_write(pager->mors, page->addr + offset, buff, num_bytes);
-	return ret;
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_WRITE_PAGE, page->addr + offset);
+	return morse_dm_write(pager->mors, page->addr + offset, buff, num_bytes);
 }
 
 static int morse_pager_hw_page_read(struct morse_pager *pager,
 				    struct morse_page *page, int offset, char *buff, int num_bytes)
 {
-	int ret;
-
 	if (offset < 0)
 		return -EINVAL;
 
@@ -293,8 +309,8 @@ static int morse_pager_hw_page_read(struct morse_pager *pager,
 	if (page->addr == 0)
 		return -EFAULT;
 
-	ret = morse_dm_read(pager->mors, page->addr + offset, buff, num_bytes);
-	return ret;
+	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_READ_PAGE, page->addr + offset);
+	return morse_dm_read(pager->mors, page->addr + offset, buff, num_bytes);
 }
 
 const struct morse_pager_ops morse_pager_hw_ops = {

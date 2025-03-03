@@ -95,6 +95,10 @@ static const char *morse_cmd_standby_exit_reason_to_str(enum morse_standby_mode_
 		return "whitelist pkt";
 	case STANDBY_MODE_EXIT_REASON_TCP_CONNECTION_LOST:
 		return "tcp connection lost";
+	case STANDBY_MODE_EXIT_REASON_HW_SCAN_NOT_ENABLED:
+		return "hw scan not enabled";
+	case STANDBY_MODE_EXIT_REASON_HW_SCAN_FAILED_TO_START:
+		return "hw scan failed to start";
 	default:
 		return "unknown";
 	}
@@ -514,12 +518,14 @@ static int morse_cmd_drv(struct morse *mors, struct ieee80211_vif *vif,
 				   " * s1g_operating_frequency       : %u\n"
 				   " * s1g_operating_bandwidth       : %d\n"
 				   " * s1g_primary_1MHz_chan_idx     : %d\n"
-				   " * primary_global_op_class       : %d\n",
+				   " * primary_global_op_class       : %d\n"
+				   " * s1g_cap0                      : %d\n",
 				   cmd_ecsa->op_class,
 				   cmd_ecsa->prim_bw,
 				   cmd_ecsa->op_chan_freq_hz,
 				   cmd_ecsa->op_bw_mhz,
-				   cmd_ecsa->prim_chan_1mhz_idx, cmd_ecsa->prim_opclass);
+				   cmd_ecsa->prim_chan_1mhz_idx, cmd_ecsa->prim_opclass,
+				   cmd_ecsa->s1g_cap0);
 			mors_vif->ecsa_channel_info.op_chan_freq_hz = cmd_ecsa->op_chan_freq_hz;
 			mors_vif->ecsa_channel_info.op_bw_mhz = cmd_ecsa->op_bw_mhz;
 			mors_vif->ecsa_channel_info.pri_1mhz_chan_idx =
@@ -528,6 +534,10 @@ static int morse_cmd_drv(struct morse *mors, struct ieee80211_vif *vif,
 			mors_vif->ecsa_channel_info.s1g_operating_class = cmd_ecsa->op_class;
 			mors_vif->ecsa_channel_info.pri_global_operating_class =
 			    cmd_ecsa->prim_opclass;
+			mors_vif->ecsa_channel_info.s1g_cap0 = cmd_ecsa->s1g_cap0;
+			mors_vif->ecsa_channel_info.s1g_cap1 = cmd_ecsa->s1g_cap1;
+			mors_vif->ecsa_channel_info.s1g_cap2 = cmd_ecsa->s1g_cap2;
+			mors_vif->ecsa_channel_info.s1g_cap3 = cmd_ecsa->s1g_cap3;
 			mors_vif->mask_ecsa_info_in_beacon = false;
 			ret = 0;
 		} else {
@@ -1000,6 +1010,17 @@ int morse_cmd_get_version(struct morse *mors)
 	return ret;
 }
 
+int morse_cmd_get_disabled_channels(struct morse *mors,
+				    struct morse_resp_get_disabled_channels *resp,
+				    uint resp_len)
+{
+	struct morse_cmd cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_GET_DISABLED_CHANNELS, 0, sizeof(cmd));
+
+	return morse_cmd_tx(mors, (struct morse_resp *)resp, &cmd, resp_len, 0, __func__);
+}
+
 int morse_cmd_cfg_scan(struct morse *mors, bool enabled)
 {
 	int ret;
@@ -1240,21 +1261,131 @@ exit:
 	return ret;
 }
 
+/**
+ * morse_cmd_get_set_non_tim_mode() - Get or Set the non-TIM mode
+ *
+ * @vif: Pointer to virtual interface
+ * @resp: Response for the command
+ * @cmd: Command request to get or set
+ * @is_set_cmd: Value indicating set/get command, 1 for set command and 0 for get command.
+ *
+ * @return Error code on failure, 0 otherwise
+ */
+static int morse_cmd_get_set_non_tim_mode(struct ieee80211_vif *vif,
+					   struct morse_cmd_param_cfm *resp,
+					   const struct morse_cmd_param_req *cmd, bool is_set_cmd)
+{
+	int ret = 0;
+	struct morse_vif *mors_vif;
+
+	if (!vif) {
+		ret = -EFAULT;
+		goto exit;
+	}
+
+	if (vif->type != NL80211_IFTYPE_STATION && vif->type != NL80211_IFTYPE_AP) {
+		ret = -EFAULT;
+		goto exit;
+	}
+	mors_vif = ieee80211_vif_to_morse_vif(vif);
+
+	if (is_set_cmd) {
+		/* Do not allow disabling non-TIM mode when STAs are associated */
+		if (vif->type == NL80211_IFTYPE_AP && cmd->value == 0 && mors_vif->ap->num_stas) {
+			ret = -EPERM;
+			goto exit;
+		}
+		mors_vif->enable_non_tim_mode = (cmd->value == 1);
+		if (mors_vif->enable_non_tim_mode &&
+			MORSE_CAPAB_SUPPORTED(&mors_vif->capabilities, NON_TIM))
+			mors_vif->s1g_cap_ie.capab_info[4] |= S1G_CAP4_NON_TIM;
+		else
+			mors_vif->s1g_cap_ie.capab_info[4] &= ~S1G_CAP4_NON_TIM;
+	} else {
+		resp->value = mors_vif->enable_non_tim_mode;
+	}
+
+exit:
+	return ret;
+}
+
+/**
+ * morse_cmd_vendor_get_params() - Get the parameter value
+ *
+ * @mors: Global Morse struct
+ * @vif: Pointer to virtual interface
+ * @cmd: Command request to get
+ * @resp: Response for the command
+ *
+ * @return Error code on failure, 0 otherwise
+ */
+static int morse_cmd_vendor_get_params(struct morse *mors, struct ieee80211_vif *vif,
+		struct morse_cmd_param_cfm *resp, const struct morse_cmd_param_req *cmd)
+{
+	int ret = 0;
+
+	switch (cmd->param_id) {
+	case MORSE_PARAM_ID_NON_TIM_MODE:
+		ret = morse_cmd_get_set_non_tim_mode(vif, resp, cmd, false);
+		break;
+	default:
+		resp->value = -1;
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
+
+/**
+ * morse_cmd_vendor_set_params() - Set the parameter value
+ *
+ * @mors: Global Morse struct
+ * @vif: Pointer to virtual interface
+ * @cmd: Command request to set
+ * @resp: Response for the command
+ *
+ * @return Error code on failure, 0 otherwise
+ */
+static int morse_cmd_vendor_set_params(struct morse *mors, struct ieee80211_vif *vif,
+		struct morse_cmd_param_cfm *resp, const struct morse_cmd_param_req *cmd)
+{
+	int ret = 0;
+
+	switch (cmd->param_id) {
+	case MORSE_PARAM_ID_NON_TIM_MODE:
+		ret = morse_cmd_get_set_non_tim_mode(vif, resp, cmd, true);
+		break;
+	default:
+		ret = -EINVAL;
+		break;
+	}
+
+	return ret;
+}
 
 /**
  * morse_cmd_vendor_get_set_params() - Get or set parameter value in driver or firmware
  *
- * @mors	Global Morse struct
- * @cmd	Command request to get or set
- * @resp	Response for the command
+ * @mors:	Global Morse struct
+ * @vif:	Pointer to virtual interface
+ * @cmd:	Command request to get or set
+ * @resp:	Response for the command
  */
-static int morse_cmd_vendor_get_set_params(struct morse *mors,
+static int morse_cmd_vendor_get_set_params(struct morse *mors, struct ieee80211_vif *vif,
 		struct morse_cmd_param_cfm *resp, const struct morse_cmd_param_req *cmd)
 {
 	int ret = 0;
 	bool is_driver_param = false;
 
 	switch (cmd->param_id) {
+	case MORSE_PARAM_ID_NON_TIM_MODE:
+		is_driver_param = true;
+		if (cmd->action == MORSE_PARAM_ACTION_GET)
+			ret = morse_cmd_vendor_get_params(mors, vif, resp, cmd);
+		else if (cmd->action == MORSE_PARAM_ACTION_SET)
+			ret = morse_cmd_vendor_set_params(mors, vif, resp, cmd);
+		break;
 	default:
 		/* Get or set command for the firmware */
 		ret = morse_cmd_tx(mors, (struct morse_resp *)resp,
@@ -1295,8 +1426,9 @@ int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
 	} else if (cmd->hdr.message_id == MORSE_COMMAND_FORCE_POWER_MODE) {
 		ret = morse_cmd_vendor_force_power_mode(mors, resp, cmd);
 	} else if (cmd->hdr.message_id == MORSE_COMMAND_GET_SET_GENERIC_PARAM) {
-		ret = morse_cmd_vendor_get_set_params(mors, (struct morse_cmd_param_cfm *)resp,
-					(struct morse_cmd_param_req *)cmd);
+		ret = morse_cmd_vendor_get_set_params(mors, vif,
+						      (struct morse_cmd_param_cfm *)resp,
+						      (struct morse_cmd_param_req *)cmd);
 	} else {
 		ret = morse_cmd_tx(mors, (struct morse_resp *)resp,
 				   (struct morse_cmd *)cmd, sizeof(*resp), 0, __func__);
@@ -1371,6 +1503,35 @@ int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
 	}
 
 exit:
+	return ret;
+}
+
+int morse_wiphy_cmd_vendor(struct morse *mors,
+		     const struct morse_cmd_vendor *cmd, int cmd_len,
+		     struct morse_resp_vendor *resp, int *resp_len)
+{
+	int ret;
+
+	resp->hdr.message_id = cmd->hdr.message_id;
+
+	if (cmd->hdr.message_id == MORSE_COMMAND_COREDUMP) {
+		ret = morse_cmd_drv(mors, NULL, (struct morse_resp *)resp,
+				    (struct morse_cmd *)cmd, sizeof(*resp), 0);
+	} else {
+		/* Command not supported yet */
+		ret = -ENOTSUPP;
+	}
+	if (ret) {
+		resp->hdr.host_id = cmd->hdr.host_id;
+		resp->status = ret;
+		*resp_len = sizeof(struct morse_resp);
+		goto exit;
+	}
+	*resp_len = resp->hdr.len + sizeof(struct morse_cmd_header);
+
+exit:
+	if (ret)
+		MORSE_ERR(mors, "%s: failed (ret:%d)\n", __func__, ret);
 	return ret;
 }
 
@@ -1481,6 +1642,22 @@ int morse_cmd_get_capabilities(struct morse *mors, u16 vif_id, struct morse_caps
 	capabilities->number_sounding_dimensions = rsp.capabilities.number_sounding_dimensions;
 	for (i = 0; i < FW_CAPABILITIES_FLAGS_WIDTH; i++)
 		capabilities->flags[i] = le32_to_cpu(rsp.capabilities.flags[i]);
+
+	return ret;
+}
+
+int morse_cmd_config_non_tim_mode(struct morse *mors, bool enable, u16 vif_id)
+{
+	int ret = 0;
+	struct morse_cmd_param_req cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_GET_SET_GENERIC_PARAM, vif_id, sizeof(cmd));
+	cmd.param_id = MORSE_PARAM_ID_NON_TIM_MODE;
+	cmd.action = MORSE_PARAM_ACTION_SET;
+	cmd.value = enable;
+	cmd.flags = 0;
+
+	ret = morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
 
 	return ret;
 }
@@ -1699,10 +1876,12 @@ int morse_cmd_get_hw_version(struct morse *mors, struct morse_resp *resp)
 	if (mors->cfg->get_hw_version)
 		hw_version = mors->cfg->get_hw_version(mors->chip_id);
 
-	resp->hdr.len = cpu_to_le16(sizeof(cfm->status) + strlen(hw_version));
 	ret = strscpy(cfm->hw_version, hw_version, sizeof(cfm->hw_version));
-	if (ret < 0)
-		MORSE_WARN(mors, "Malformed hw_version\n");
+
+	if (ret == -E2BIG)
+		MORSE_WARN(mors, "Hardware version string truncated\n");
+
+	resp->hdr.len = cpu_to_le16(sizeof(*cfm) - sizeof(cfm->hdr));
 
 	return 0;
 }
@@ -1854,3 +2033,151 @@ int morse_cmd_hw_scan(struct morse *mors, struct morse_hw_scan_params *params, b
 	return ret;
 }
 
+int morse_cmd_set_country(struct morse *mors, const char *country_code)
+{
+	struct morse_cmd_param_req cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_GET_SET_GENERIC_PARAM, 0, sizeof(cmd));
+	cmd.param_id = MORSE_PARAM_ID_COUNTRY;
+	cmd.action = MORSE_PARAM_ACTION_SET;
+	cmd.flags = 0;
+	cmd.value = country_code[0] | country_code[1] << 8;
+
+	return morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+}
+
+int morse_cmd_set_rts_threshold(struct morse *mors, u32 rts_threshold)
+{
+	struct morse_cmd_param_req cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_GET_SET_GENERIC_PARAM, 0, sizeof(cmd));
+	cmd.param_id = MORSE_PARAM_ID_RTS_THRESHOLD;
+	cmd.action = MORSE_PARAM_ACTION_SET;
+	cmd.flags = 0;
+	cmd.value = rts_threshold;
+
+	return morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+}
+
+int morse_cmd_start_scan(struct morse *mors,
+			 u8 n_ssids,
+			 const u8 *ssid, size_t ssid_len,
+			 const u8 *extra_ies, size_t extra_ies_len, u32 dwell_time_ms)
+{
+	struct morse_cmd_start_scan *cmd;
+	int ret;
+
+	cmd = kzalloc(sizeof(*cmd), GFP_KERNEL);
+	if (!cmd)
+		return -ENOMEM;
+
+	morse_cmd_init(mors, &cmd->hdr, MORSE_COMMAND_START_SCAN, 0, sizeof(*cmd));
+
+	cmd->dwell_time_ms = dwell_time_ms;
+	if (extra_ies_len) {
+		extra_ies_len = min(sizeof(cmd->extra_ies), extra_ies_len);
+		memcpy(cmd->extra_ies, extra_ies, extra_ies_len);
+		cmd->extra_ies_len = extra_ies_len;
+	}
+	cmd->n_ssids = n_ssids;
+	if (ssid_len) {
+		ssid_len = min(sizeof(cmd->ssid), ssid_len);
+		memcpy(cmd->ssid, ssid, ssid_len);
+		cmd->ssid_len = ssid_len;
+	}
+
+	ret = morse_cmd_tx(mors, NULL, (struct morse_cmd *)cmd, 0, 0, __func__);
+
+	kfree(cmd);
+
+	return ret;
+}
+
+int morse_cmd_abort_scan(struct morse *mors)
+{
+	struct morse_cmd_abort_scan cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_ABORT_SCAN, 0, sizeof(cmd));
+
+	return morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+}
+
+int morse_cmd_connect(struct morse *mors, const u8 *ssid, size_t ssid_len,
+		      enum nl80211_auth_type auth_type,
+		      const u8 *sae_pwd, size_t sae_pwd_len)
+{
+	struct morse_cmd_connect cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_CONNECT, 0, sizeof(cmd));
+
+	switch (auth_type) {
+	case NL80211_AUTHTYPE_OPEN_SYSTEM:
+		cmd.auth_type = CONNECT_AUTH_TYPE_OPEN;
+		break;
+	case NL80211_AUTHTYPE_SAE:
+		cmd.auth_type = CONNECT_AUTH_TYPE_SAE;
+		break;
+	case NL80211_AUTHTYPE_AUTOMATIC:
+		cmd.auth_type = CONNECT_AUTH_TYPE_AUTOMATIC;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	if (ssid_len < 1 || ssid_len > sizeof(cmd.ssid))
+		return -EINVAL;
+	memcpy(cmd.ssid, ssid, ssid_len);
+	cmd.ssid_len = ssid_len;
+
+	if (sae_pwd_len > sizeof(cmd.sae_pwd))
+		return -EINVAL;
+	memcpy(cmd.sae_pwd, sae_pwd, sae_pwd_len);
+	cmd.sae_pwd_len = sae_pwd_len;
+
+	return morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+}
+
+int morse_cmd_disconnect(struct morse *mors)
+{
+	struct morse_cmd_disconnect cmd;
+
+	morse_cmd_init(mors, &cmd.hdr, MORSE_COMMAND_DISCONNECT, 0, sizeof(cmd));
+
+	return morse_cmd_tx(mors, NULL, (struct morse_cmd *)&cmd, 0, 0, __func__);
+}
+
+int morse_cmd_get_connection_state(struct morse *mors, s8 *signal,
+				   u32 *connected_time_s, u8 *dtim_period,
+				   u16 *beacon_interval_tu)
+{
+	struct morse_cmd_get_connection_state_req req;
+	struct morse_cmd_get_connection_state_cfm cfm;
+	s16 signal_from_chip;
+	int ret;
+
+	morse_cmd_init(mors, &req.hdr, MORSE_COMMAND_GET_CONNECTION_STATE, 0, sizeof(req));
+
+	ret = morse_cmd_tx(mors, (struct morse_resp *)&cfm, (struct morse_cmd *)&req,
+			   sizeof(cfm), 0, __func__);
+	if (ret)
+		return ret;
+
+	/* The chip gives us a signal indication in dBm as int16_t. */
+	signal_from_chip = (s16)le16_to_cpu(cfm.rssi);
+
+	if (signal_from_chip >= S8_MIN && signal_from_chip <= S8_MAX)
+		*signal = signal_from_chip;
+	else
+		*signal = 0;
+
+	*connected_time_s = le32_to_cpu(cfm.connected_time_s);
+
+	if (le16_to_cpu(cfm.dtim_period) <= U8_MAX)
+		*dtim_period = le16_to_cpu(cfm.dtim_period);
+	else
+		*dtim_period = U8_MAX;
+
+	*beacon_interval_tu = le16_to_cpu(cfm.beacon_interval_tu);
+
+	return 0;
+}

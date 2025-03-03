@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2022 Morse Micro
+ * Copyright 2017-2024 Morse Micro
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
@@ -17,6 +17,7 @@
 #include "tim.h"
 #include "../morse.h"
 #include "s1g_channels_rules.c"
+#include "channel_alphas.h"
 
 #define CHANNEL_FLAGS_BW_MASK 0x7c000
 
@@ -41,6 +42,7 @@ struct morse_dot11ah_ch_map {
 	int (*get_pri_1mhz_chan)(int primary_channel,
 				 int primary_channel_width_mhz,
 				 bool pri_1_mhz_loc_upper);
+	int (*transform_overlapping_5g_chan)(int chan_5g);
 	u32 num_mapped_channels;
 	struct morse_dot11ah_channel *s1g_channels;
 };
@@ -183,6 +185,20 @@ static int s1g_op_chan_pri_chan_to_5g_jp(int s1g_op_chan, int s1g_pri_chan)
 	return morse_dot11ah_s1g_chan_to_5g_chan(s1g_pri_chan) + ht20mhz_offset;
 }
 
+static int transform_overlapping_5g_chan_jp(int chan_5g)
+{
+	int ht20mhz_offset = 0;
+
+	/* In the JP regulatory, some S1G primary channels map to multiple 5G channels.
+	 * Only the first mapping is maintained, so transform the overlapping channels back
+	 * to the known set.
+	 */
+	if (chan_5g == 52 || chan_5g == 56 || chan_5g == 60)
+		ht20mhz_offset = 12;
+
+	return chan_5g - ht20mhz_offset;
+}
+
 static int get_pri_1mhz_chan_default(int primary_channel,
 			      int primary_channel_width_mhz, bool pri_1_mhz_loc_upper)
 {
@@ -217,88 +233,117 @@ static int get_pri_1mhz_chan_jp(int primary_channel,
 	}
 }
 
-static const struct morse_dot11ah_ch_map mors_us_map = {
-		.alpha = US_CHANNEL_ALPHA,
-		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
-		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
-		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
-		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
-		.num_mapped_channels = ARRAY_SIZE(us_s1g_channels),
-		.s1g_channels = us_s1g_channels,
-}; /* End US Map */
-
+/* AU map */
 static const struct morse_dot11ah_ch_map mors_au_map = {
-		.alpha = AU_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_AU,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(au_s1g_channels),
 		.s1g_channels = au_s1g_channels,
-}; /* End AU Map */
+};
 
+/* NZ map */
 static const struct morse_dot11ah_ch_map mors_nz_map = {
-		.alpha = NZ_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_NZ,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(nz_s1g_channels),
 		.s1g_channels = nz_s1g_channels,
-}; /* End NZ Map */
+};
 
-static const struct morse_dot11ah_ch_map mors_eu_map = {
-		.alpha = EU_CHANNEL_ALPHA,
+/* CA map */
+static const struct morse_dot11ah_ch_map mors_ca_map = {
+		.alpha = CHANNEL_ALPHA_CA,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
+		.num_mapped_channels = ARRAY_SIZE(ca_s1g_channels),
+		.s1g_channels = ca_s1g_channels,
+};
+
+/* EU map */
+static const struct morse_dot11ah_ch_map mors_eu_map = {
+		.alpha = CHANNEL_ALPHA_EU,
+		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
+		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
+		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
+		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(eu_s1g_channels),
 		.s1g_channels = eu_s1g_channels,
-}; /* End EU Map */
+};
 
+/* IN map */
 static const struct morse_dot11ah_ch_map mors_in_map = {
-		.alpha = IN_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_IN,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(in_s1g_channels),
 		.s1g_channels = in_s1g_channels,
-}; /* End IN Map */
+};
 
+/* JP map */
 static const struct morse_dot11ah_ch_map mors_jp_map = {
-		.alpha = JP_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_JP,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_jp,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_jp,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_jp,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_jp,
+		.transform_overlapping_5g_chan = &transform_overlapping_5g_chan_jp,
 		.num_mapped_channels = ARRAY_SIZE(jp_s1g_channels),
 		.s1g_channels = jp_s1g_channels,
-}; /* End JP Map */
+};
 
+/* KR map */
 static const struct morse_dot11ah_ch_map mors_kr_map = {
-		.alpha = KR_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_KR,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(kr_s1g_channels),
 		.s1g_channels = kr_s1g_channels,
-}; /* End KR Map */
+};
 
+/* SG map */
 static const struct morse_dot11ah_ch_map mors_sg_map = {
-		.alpha = SG_CHANNEL_ALPHA,
+		.alpha = CHANNEL_ALPHA_SG,
 		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
 		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
 		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
 		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
 		.num_mapped_channels = ARRAY_SIZE(sg_s1g_channels),
 		.s1g_channels = sg_s1g_channels,
-}; /* End SG Map */
+};
+
+/* US map */
+static const struct morse_dot11ah_ch_map mors_us_map = {
+		.alpha = CHANNEL_ALPHA_US,
+		.prim_1mhz_channel_loc_to_idx = &prim_1mhz_channel_loc_to_idx_default,
+		.calculate_primary_s1g = &calculate_primary_s1g_channel_default,
+		.s1g_op_chan_pri_chan_to_5g = &s1g_op_chan_pri_chan_to_5g_default,
+		.get_pri_1mhz_chan = &get_pri_1mhz_chan_default,
+		.transform_overlapping_5g_chan = NULL,
+		.num_mapped_channels = ARRAY_SIZE(us_s1g_channels),
+		.s1g_channels = us_s1g_channels,
+};
 
 const struct morse_dot11ah_ch_map *mapped_channels[] = {
 	&mors_au_map,
+	&mors_ca_map,
 	&mors_eu_map,
 	&mors_in_map,
 	&mors_jp_map,
@@ -344,24 +389,50 @@ static enum morse_dot11ah_region morse_reg_get_region(const char *alpha)
 {
 	if (!alpha)
 		return REGION_UNSET;
+
 	if (!strcmp(alpha, "AU"))
 		return MORSE_AU;
+
+	if (!strcmp(alpha, "CA"))
+		return MORSE_CA;
+
 	if (!strcmp(alpha, "EU"))
 		return MORSE_EU;
+
 	if (!strcmp(alpha, "IN"))
 		return MORSE_IN;
+
 	if (!strcmp(alpha, "JP"))
 		return MORSE_JP;
+
 	if (!strcmp(alpha, "KR"))
 		return MORSE_KR;
+
 	if (!strcmp(alpha, "NZ"))
 		return MORSE_NZ;
+
 	if (!strcmp(alpha, "SG"))
 		return MORSE_SG;
+
 	if (!strcmp(alpha, "US"))
 		return MORSE_US;
-	/* If the region is unknown */
+
 	return REGION_UNSET;
+}
+
+struct morse_dot11ah_channel *lookup_s1g_chan_from_5g_chan(int chan_5g)
+{
+	int ch;
+
+	if (__mors_s1g_map->transform_overlapping_5g_chan)
+		chan_5g = __mors_s1g_map->transform_overlapping_5g_chan(chan_5g);
+
+	for (ch = 0; ch < __mors_s1g_map->num_mapped_channels; ch++) {
+		if (chan_5g == __mors_s1g_map->s1g_channels[ch].hw_value_map)
+			return &__mors_s1g_map->s1g_channels[ch];
+	}
+
+	return NULL;
 }
 
 #if KERNEL_VERSION(5, 10, 11) > MAC80211_VERSION_CODE
@@ -406,19 +477,9 @@ EXPORT_SYMBOL(morse_dot11ah_s1g_chan_to_s1g_freq);
 /* Return s1g channel number given 5g channel number and op class */
 u16 morse_dot11ah_5g_chan_to_s1g_ch(u8 chan_5g, u8 op_class)
 {
-	enum nl80211_band new_band = NL80211_BAND_5GHZ;
-	u32 new_freq, ch = 0;
+	struct morse_dot11ah_channel *chan = lookup_s1g_chan_from_5g_chan(chan_5g);
 
-	ieee80211_operating_class_to_band(op_class, &new_band);
-
-	new_freq = ieee80211_channel_to_frequency(chan_5g, new_band);
-
-	for (ch = 0; ch < __mors_s1g_map->num_mapped_channels; ch++) {
-		if (chan_5g ==  __mors_s1g_map->s1g_channels[ch].hw_value_map)
-			return __mors_s1g_map->s1g_channels[ch].ch.hw_value;
-	}
-
-	return false;
+	return (chan) ? chan->ch.hw_value : 0;
 }
 EXPORT_SYMBOL(morse_dot11ah_5g_chan_to_s1g_ch);
 
@@ -450,34 +511,21 @@ EXPORT_SYMBOL(morse_dot11ah_s1g_freq_to_s1g);
 const struct morse_dot11ah_channel
 *morse_dot11ah_5g_chan_to_s1g(struct ieee80211_channel *chan_5g)
 {
-	int ch;
-
-	for (ch = 0; ch < __mors_s1g_map->num_mapped_channels; ch++)
-		if (chan_5g->hw_value ==  __mors_s1g_map->s1g_channels[ch].hw_value_map)
-			return &__mors_s1g_map->s1g_channels[ch];
-
-	return NULL;
+	return lookup_s1g_chan_from_5g_chan(chan_5g->hw_value);
 }
 EXPORT_SYMBOL(morse_dot11ah_5g_chan_to_s1g);
 
 const struct morse_dot11ah_channel
 *morse_dot11ah_channel_chandef_to_s1g(struct cfg80211_chan_def *chan_5g)
 {
-	int ch;
 	int hwval;
 
-	if (chan_5g->center_freq1 &&
-			chan_5g->center_freq1 != chan_5g->chan->center_freq)
+	if (chan_5g->center_freq1 && chan_5g->center_freq1 != chan_5g->chan->center_freq)
 		hwval = ieee80211_frequency_to_channel(chan_5g->center_freq1);
 	else
 		hwval = ieee80211_frequency_to_channel(chan_5g->chan->center_freq);
 
-	for (ch = 0; ch < __mors_s1g_map->num_mapped_channels; ch++) {
-		if (hwval ==  __mors_s1g_map->s1g_channels[ch].hw_value_map)
-			return &__mors_s1g_map->s1g_channels[ch];
-	}
-
-	return NULL;
+	return lookup_s1g_chan_from_5g_chan(hwval);
 }
 EXPORT_SYMBOL(morse_dot11ah_channel_chandef_to_s1g);
 
@@ -535,6 +583,7 @@ int morse_dot11ah_channel_to_freq_khz(int chan)
 
 	switch (region) {
 	case MORSE_AU:
+	case MORSE_CA:
 	case MORSE_NZ:
 	case MORSE_US:
 		return 902000 + chan * 500;
@@ -545,13 +594,6 @@ int morse_dot11ah_channel_to_freq_khz(int chan)
 			return 901400 + chan * 500;
 	case MORSE_IN:
 		return 863000 + chan * 500;
-	case MORSE_KR:
-		return 917500 + chan * 500;
-	case MORSE_SG:
-		if (chan < 37)
-			return 863000 + chan * 500;
-		else
-			return 902000 + chan * 500;
 	case MORSE_JP:
 		if (chan <= 21) {
 			if (chan & 0x1)
@@ -561,6 +603,13 @@ int morse_dot11ah_channel_to_freq_khz(int chan)
 		} else {
 			return 906500 + chan * 500;
 		}
+	case MORSE_KR:
+		return 917500 + chan * 500;
+	case MORSE_SG:
+		if (chan < 31)
+			return 863000 + chan * 500;
+		else
+			return 902000 + chan * 500;
 	case REGION_UNSET:
 	default:
 		break;
@@ -578,6 +627,7 @@ int morse_dot11ah_freq_khz_bw_mhz_to_chan(u32 freq, u8 bw)
 
 	switch (region) {
 	case MORSE_AU:
+	case MORSE_CA:
 	case MORSE_NZ:
 	case MORSE_US:
 		channel = (freq - 902000) /  500;

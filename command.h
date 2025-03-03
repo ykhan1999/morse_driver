@@ -118,7 +118,14 @@ enum morse_commands_id {
 	MORSE_COMMAND_HW_SCAN = 0x0044,
 	MORSE_COMMAND_FORCE_POWER_MODE = 0x00048,
 	MORSE_COMMAND_SET_LI_SLEEP = 0x0049,
+	MORSE_COMMAND_GET_DISABLED_CHANNELS = 0x004A,
 
+	/* Fullmac-specific commands starting at 0x0800 */
+	MORSE_COMMAND_START_SCAN = 0x0801,
+	MORSE_COMMAND_ABORT_SCAN = 0x0802,
+	MORSE_COMMAND_CONNECT = 0x0803,
+	MORSE_COMMAND_DISCONNECT = 0x0804,
+	MORSE_COMMAND_GET_CONNECTION_STATE = 0x0805,
 
 	/* Temporary Commands that may be removed later */
 	MORSE_COMMAND_SET_MODULATION = 0x1000,
@@ -760,6 +767,10 @@ struct morse_cmd_ecsa {
 	u8 prim_chan_1mhz_idx;
 	u8 op_bw_mhz;
 	u8 prim_opclass;
+	u8 s1g_cap0;
+	u8 s1g_cap1;
+	u8 s1g_cap2;
+	u8 s1g_cap3;
 } __packed;
 
 struct morse_cmd_send_wake_action_frame {
@@ -1026,6 +1037,10 @@ enum morse_standby_mode_exit_reason {
 	STANDBY_MODE_EXIT_REASON_WHITELIST_PKT,
 	/** TCP connection lost */
 	STANDBY_MODE_EXIT_REASON_TCP_CONNECTION_LOST,
+	/** HW scan is not enabled */
+	STANDBY_MODE_EXIT_REASON_HW_SCAN_NOT_ENABLED,
+	/** HW scan failed to start */
+	STANDBY_MODE_EXIT_REASON_HW_SCAN_FAILED_TO_START,
 };
 
 enum dhcp_offload_opcode {
@@ -1305,7 +1320,10 @@ enum morse_param_action {
 enum morse_param_id {
 	MORSE_PARAM_ID_MAX_TRAFFIC_DELIVERY_WAIT_US	= 0,
 	MORSE_PARAM_ID_EXTRA_ACK_TIMEOUT_ADJUST_US	= 1,
+	MORSE_PARAM_ID_COUNTRY = 13,
+	MORSE_PARAM_ID_RTS_THRESHOLD = 14,
 	MORSE_PARAM_ID_HOST_TX_BLOCK = 15,
+	MORSE_PARAM_ID_NON_TIM_MODE = 17,
 
 	MORSE_PARAM_ID_LAST,
 	MORSE_PARAM_ID_MAX = __UINT32_MAX__,
@@ -1369,6 +1387,82 @@ struct morse_cmd_param_cfm {
 	u32 value;
 } __packed;
 
+struct morse_disabled_channel_entry {
+	/** Frequency (100 kHz units for compression) */
+	__le16 freq_100khz;
+	/** Bandwidth (MHz) */
+	u8 bw_mhz;
+} __packed;
+
+struct morse_resp_get_disabled_channels {
+	struct morse_cmd_header hdr;
+	__le32 status;
+	/** Number of channels in response */
+	__le32 n_channels;
+	/** Variable length array of disabled channels */
+	struct morse_disabled_channel_entry channels[];
+} __packed;
+
+struct morse_cmd_start_scan {
+	struct morse_cmd_header hdr;
+	__le32 dwell_time_ms;
+	u8 n_ssids;
+	u8 __padding[2];
+	u8 ssid_len;
+	u8 ssid[IEEE80211_MAX_SSID_LEN];
+	__le16 extra_ies_len;
+	u8 extra_ies[SCAN_EXTRA_IES_MAX_LEN];
+} __packed;
+
+struct morse_cmd_abort_scan {
+	struct morse_cmd_header hdr;
+} __packed;
+
+enum connect_auth_type {
+	CONNECT_AUTH_TYPE_INVALID = 0,
+	CONNECT_AUTH_TYPE_OPEN = 1,
+	CONNECT_AUTH_TYPE_OWE = 2,
+	CONNECT_AUTH_TYPE_SAE = 3,
+	/** Any authentication type may be used when connecting. */
+	CONNECT_AUTH_TYPE_AUTOMATIC = 255,
+};
+
+struct morse_cmd_connect {
+	struct morse_cmd_header hdr;
+	u8 auth_type;
+	u8 ssid_len;
+	u8 ssid[IEEE80211_MAX_SSID_LEN];
+	u8 __padding[3];
+	u8 sae_pwd_len;
+	u8 sae_pwd[MORSE_SAE_PASSWORD_MAX_LEN];
+} __packed;
+
+struct morse_cmd_disconnect {
+	struct morse_cmd_header hdr;
+} __packed;
+
+struct morse_cmd_get_connection_state_req {
+	struct morse_cmd_header hdr;
+} __packed;
+
+/**
+ * struct morse_cmd_get_connection_state_cfm - Confirm message for GET_CONNECTION_STATE.
+ * @hdr: Common command header.
+ * @status: Command status.
+ * @beacon_interval_tu: Beacon interval in TUs.
+ * @dtim_period: DTIM period.
+ * @rssi: Signal strength of the most recently received beacon in dBm as signed 16-bit.
+ * @connected_time_s: Time since connection was established in seconds.
+ */
+struct morse_cmd_get_connection_state_cfm {
+	struct morse_cmd_header hdr;
+	__le32 status;
+	__le16 beacon_interval_tu;
+	__le16 dtim_period;
+	__le16 rssi;
+	u8 __padding[2];
+	__le32 connected_time_s;
+} __packed;
 
 int morse_cmd_set_duty_cycle(struct morse *mors, enum duty_cycle_mode mode,
 			     int duty_cycle, bool omit_ctrl_resp);
@@ -1382,6 +1476,9 @@ int morse_cmd_rm_if(struct morse *mors, u16 id);
 int morse_cmd_resp_process(struct morse *mors, struct sk_buff *skb);
 int morse_cmd_cfg_bss(struct morse *mors, u16 id, u16 beacon_int, u16 dtim_period, u32 cssid);
 int morse_cmd_vendor(struct morse *mors, struct ieee80211_vif *vif,
+		     const struct morse_cmd_vendor *cmd, int cmd_len,
+		     struct morse_resp_vendor *resp, int *resp_len);
+int morse_wiphy_cmd_vendor(struct morse *mors,
 		     const struct morse_cmd_vendor *cmd, int cmd_len,
 		     struct morse_resp_vendor *resp, int *resp_len);
 int morse_cmd_set_channel(struct morse *mors, u32 op_chan_freq_hz,
@@ -1408,6 +1505,16 @@ int morse_cmd_arp_offload_update_ip_table(struct morse *mors, u16 vif_id,
 					  int arp_addr_count, u32 *arp_addr_list);
 int morse_cmd_get_capabilities(struct morse *mors,
 			       u16 vif_id, struct morse_caps *capabilities);
+/**
+ * morse_cmd_config_non_tim_mode() - Configure non-TIM mode.
+ *
+ * @mors: morse chip struct
+ * @enable: enable or disable non-TIM mode
+ * @vif_id: interface id
+ *
+ * @return 0 on success, else error code
+ */
+int morse_cmd_config_non_tim_mode(struct morse *mors, bool enable, u16 vif_id);
 int morse_cmd_enable_li_sleep(struct morse *mors,  u16 listen_interval, u16 vif_id);
 int morse_cmd_dhcpc_enable(struct morse *mors, u16 vif_id);
 int morse_cmd_twt_agreement_validate_req(struct morse *mors,
@@ -1499,5 +1606,29 @@ int morse_cmd_configure_page_slicing(struct morse_vif *mors_vif, bool enable);
  */
 int morse_cmd_hw_scan(struct morse *mors, struct morse_hw_scan_params *params, bool store);
 
+/**
+ * morse_cmd_get_disabled_channels() - Retrieve channels that are disabled by hardware.
+ *
+ * @mors: Morse structure
+ * @resp: Allocated response to store disabled channels in
+ * @resp_len: Size of allocated response buffer.
+ *
+ * Return: 0 on success, else error code
+ */
+int morse_cmd_get_disabled_channels(struct morse *mors,
+				    struct morse_resp_get_disabled_channels *resp,
+				    uint resp_len);
+int morse_cmd_set_country(struct morse *mors, const char *country_code);
+int morse_cmd_set_rts_threshold(struct morse *mors, u32 rts_threshold);
+int morse_cmd_start_scan(struct morse *mors, u8 n_ssids, const u8 *ssid, size_t ssid_len,
+			 const u8 *extra_ies, size_t extra_ies_len, u32 dwell_time_ms);
+int morse_cmd_abort_scan(struct morse *mors);
+int morse_cmd_connect(struct morse *mors, const u8 *ssid, size_t ssid_len,
+		      enum nl80211_auth_type auth_type,
+		      const u8 *sae_pwd, size_t sae_pwd_len);
+int morse_cmd_disconnect(struct morse *mors);
+int morse_cmd_get_connection_state(struct morse *mors, s8 *signal,
+				   u32 *connected_time_s, u8 *dtim_period,
+				   u16 *beacon_interval_tu);
 
 #endif /* !_MORSE_COMMAND_H_ */

@@ -486,12 +486,14 @@ int morse_coredump(struct morse *mors)
 		break;
 	}
 
-	morse_release_bus(mors);
+	if (mors->cfg->post_coredump_hook)
+		ret = mors->cfg->post_coredump_hook(mors, method);
 
 exit:
 	if (ret)
 		MORSE_COREDUMP_ERR(mors, "%s: failed to coredump: %d\n", __func__, ret);
 
+	morse_release_bus(mors);
 	return ret;
 }
 

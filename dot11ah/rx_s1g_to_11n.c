@@ -218,18 +218,14 @@ static u8 *morse_dot11_insert_vht_cap_ie(u8 *pos, struct dot11ah_ies_mask *ies_m
 		u8 s1g_rx_mcs_map = s1g_supp_mcs_nss[0];
 		u8 s1g_tx_mcs_map = (s1g_supp_mcs_nss[2] >> 1) | (s1g_supp_mcs_nss[3] << 7);
 
-		/* sgi parameters */
-		if (s1g_capab_info[0] & (S1G_CAP0_SGI_1MHZ |
-					 S1G_CAP0_SGI_2MHZ |
-					 S1G_CAP0_SGI_4MHZ |
-					 S1G_CAP0_SGI_8MHZ)) {
-			/* If we have any sgi cap, assume we have all */
-			vht_capab_info |= IEEE80211_VHT_CAP_SHORT_GI_80 |
-					  IEEE80211_VHT_CAP_SHORT_GI_160;
+		if ((s1g_capab_info[0] & S1G_CAP0_SUPP_CH_WIDTH) >= S1G_CAP0_SUPP_8MHZ)
+			vht_capab_info |= IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ;
 
-			if (s1g_capab_info[0] & S1G_CAP0_SGI_8MHZ)
-				vht_capab_info |= IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ;
-		}
+		/* sgi parameters */
+		if (s1g_capab_info[0] & S1G_CAP0_SGI_4MHZ)
+			vht_capab_info |= IEEE80211_VHT_CAP_SHORT_GI_80;
+		if (s1g_capab_info[0] & S1G_CAP0_SGI_8MHZ)
+			vht_capab_info |= IEEE80211_VHT_CAP_SHORT_GI_160;
 
 		if (s1g_capab_info[1] & S1G_CAP1_RX_LDPC)
 			vht_capab_info |= IEEE80211_VHT_CAP_RXLDPC;

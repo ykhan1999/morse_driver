@@ -45,7 +45,8 @@ static const u8 morse_oui[] = { 0x0C, 0xBF, 0x74 };
 #define MORSE_VENDOR_SPECIFIC_FRAME_SUBCAT_WAKE (0x01)
 
 enum morse_vendor_cmds {
-	MORSE_VENDOR_CMD_TO_MORSE = 0
+	MORSE_VENDOR_CMD_TO_MORSE = 0,
+	MORSE_VENDOR_WIPHY_CMD_TO_MORSE = 1,
 };
 
 enum morse_vendor_events {

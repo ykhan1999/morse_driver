@@ -111,11 +111,11 @@ int morse_bus_test(struct morse *mors, const char *bus_name)
 	u32 cmp_size_list[] = BUS_TEST_SIZE_LIST;
 	u32 address_list[] = BUS_TEST_READ_WRITE_ADDRESS_LIST;
 
-	MORSE_INFO(mors, "---==[ START %s BUS TEST ]==---\n", bus_name);
+	MORSE_WARN(mors, "---==[ START %s BUS TEST ]==---\n", bus_name);
 	morse_claim_bus(mors);
 	ret = morse_reg32_read(mors, MORSE_REG_CHIP_ID(mors), &chip_id);
 	if (!morse_hw_is_valid_chip_id(chip_id, mors->cfg->valid_chip_ids)) {
-		MORSE_ERR(mors, "%s ChipId=0x%x) is not valid.\n", __func__, mors->chip_id);
+		MORSE_ERR(mors, "%s Chip ID 0x%x is not valid\n", __func__, mors->chip_id);
 		ret = -1;
 		goto exit;
 	}
@@ -130,14 +130,14 @@ int morse_bus_test(struct morse *mors, const char *bus_name)
 		int address_idx;
 
 		for (address_idx = 0; address_idx < ARRAY_SIZE(address_list); address_idx++) {
-			MORSE_INFO(mors, "%s: Writing, Reading and verifying:\n", __func__);
+			MORSE_INFO(mors, "%s: Writing, reading and verifying:\n", __func__);
 			ret =
 			    morse_bus_write_read_compare(mors, cmp_size, 0xAA,
 							 address_list[address_idx]);
 			if (ret)
 				goto exit;
 
-			MORSE_INFO(mors, "%s: Clearing, Reading and verifying:\n", __func__);
+			MORSE_INFO(mors, "%s: Clearing, reading and verifying:\n", __func__);
 			ret =
 			    morse_bus_write_read_compare(mors, cmp_size, 0,
 							 address_list[address_idx]);
@@ -154,7 +154,7 @@ int morse_bus_test(struct morse *mors, const char *bus_name)
 
 exit:
 	morse_release_bus(mors);
-	MORSE_INFO(mors, "---==[ %s BUS TEST %s ]==---\n", bus_name, ret ? "FAILED" : "PASSED");
+	MORSE_WARN(mors, "---==[ %s BUS TEST %s ]==---\n", bus_name, ret ? "FAILED" : "PASSED");
 	return ret;
 }
 

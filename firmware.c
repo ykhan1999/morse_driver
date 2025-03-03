@@ -350,6 +350,10 @@ static void morse_firmware_clear_aon(struct morse *mors)
 
 	if (address)
 		for (idx = 0; idx < count; idx++, address += 4) {
+			if (mors->bus_type == MORSE_HOST_BUS_TYPE_USB && idx == 0)
+				/* Keep the USB power domain enabled in AON. */
+				morse_reg32_write(mors, address, MORSE_REG_AON_USB_RESET(mors));
+			else
 				/* clear AON in case there is any latched sleeps */
 				morse_reg32_write(mors, address, 0x0);
 		}
@@ -369,8 +373,9 @@ static void morse_firmware_clear_aon(struct morse *mors)
 
 static int morse_firmware_trigger(struct morse *mors)
 {
-	morse_claim_bus(mors);
+	const unsigned int wait_after_msi_trigger_ms = 1;
 
+	morse_claim_bus(mors);
 	/*
 	 * If not coming from a full reset, some AON flags may be latched.
 	 * Make sure to clear any hanging AON bits (can affect booting).
@@ -382,6 +387,11 @@ static int morse_firmware_trigger(struct morse *mors)
 
 	morse_reg32_write(mors, MORSE_REG_MSI(mors), MORSE_REG_MSI_HOST_INT(mors));
 	morse_release_bus(mors);
+
+	/* Give the chip a chance to boot / prepare for driver interaction after triggering
+	 * the MSI register.
+	 */
+	mdelay(wait_after_msi_trigger_ms);
 	return 0;
 }
 
@@ -527,7 +537,7 @@ static int morse_firmware_read_ext_host_table(struct morse *mors,
 	/* Round up to the nearest word, as dm reads must be multiples of word size */
 	ext_host_tbl_len = ROUND_BYTES_TO_WORD(ext_host_tbl_len);
 
-	if (WARN_ON(ext_host_tbl_len > INT_MAX)) {
+	if (WARN_ON(ext_host_tbl_len == 0 || ext_host_tbl_len > INT_MAX)) {
 		ret = -EINVAL;
 		goto exit;
 	}
@@ -688,9 +698,8 @@ int morse_firmware_parse_extended_host_table(struct morse *mors)
 	if (ret || !ext_host_table)
 		goto exit;
 
-	set_mac_addr(mors, ext_host_table->dev_mac_addr);
-
 	MORSE_INFO(mors, "Firmware Manifest MAC: %pM", ext_host_table->dev_mac_addr);
+	set_mac_addr(mors, ext_host_table->dev_mac_addr);
 
 	/* Parse the TLVs */
 	head = ext_host_table->ext_host_table_data_tlvs;
@@ -716,6 +725,11 @@ int morse_firmware_parse_extended_host_table(struct morse *mors)
 					(struct extended_host_table_insert_skb_checksum *)hdr);
 			break;
 
+		case MORSE_FW_HOST_TABLE_TAG_YAPS_TABLE:
+			morse_yaps_hw_read_table(mors,
+						 &((struct extended_host_table_yaps_table *)
+						   hdr)->yaps_table);
+			break;
 
 		case MORSE_FW_HOST_TABLE_TAG_PAGER_PKT_MEMORY:
 			update_pager_pkt_memory(mors,

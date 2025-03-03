@@ -12,6 +12,7 @@
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 #include <linux/gpio.h>
+#include <linux/jiffies.h>
 
 #include "morse.h"
 #include "debug.h"
@@ -23,64 +24,80 @@
 
 #define MORSE_PS_DBG(_m, _f, _a...)		morse_dbg(FEATURE_ID_POWERSAVE, _m, _f, ##_a)
 
-static inline bool morse_ps_is_busy_pin_asserted(struct morse *mors)
+static bool morse_ps_is_busy_pin_asserted(struct morse *mors)
 {
 	bool active_high = !(mors->firmware_flags & MORSE_FW_FLAGS_BUSY_ACTIVE_LOW);
+
+	if (!mors->cfg->mm_ps_gpios_supported)
+		return false;
 
 	return (!!gpio_get_value(mors->cfg->mm_ps_async_gpio) == active_high);
 }
 
-static inline u8 morse_ps_get_wakeup_delay_ms(struct morse *mors)
+static u8 morse_ps_get_wakeup_delay_ms(struct morse *mors)
 {
 	return mors->cfg->get_ps_wakeup_delay_ms(mors->chip_id);
 }
 
-static int __morse_ps_wakeup(struct morse_ps *mps)
+static void morse_ps_set_wake_gpio(struct morse *mors, bool raise)
 {
-	struct morse *mors = container_of(mps, struct morse, ps);
+	int ret;
 
-	if (mps->enable && mps->suspended) {
-		MORSE_PS_DBG(mors, "%s: Wakeup Pin Set\n", __func__);
-		/* bring chip up (and give it sometime to recover) */
-		if (mors->cfg->mm_ps_gpios_supported) {
-			gpio_direction_output(mors->cfg->mm_wake_gpio, 1);
-			mdelay(morse_ps_get_wakeup_delay_ms(mors));
-		}
+	if (!mors->cfg->mm_ps_gpios_supported)
+		return;
 
-		/* Enable SDIO bus and start getting interrupts */
-		morse_set_bus_enable(mors, true);
-		mps->suspended = false;
+	ret = gpio_direction_output(mors->cfg->mm_wake_gpio, (raise) ? 1 : 0);
+
+	if (ret) {
+		MORSE_ERR(mors, "%s: Failed to %s wake pin (ret:%d)", __func__,
+			  (raise) ? "raise" : "lower", ret);
+		return;
 	}
 
-	return 0;
+	MORSE_PS_DBG(mors, "%s: %s wake up pin", __func__, (raise) ? "set" : "cleared");
+}
+
+static void morse_ps_wait_after_wake_pin_raise(struct morse *mors)
+{
+	if (!mors->cfg->mm_ps_gpios_supported)
+		return;
+
+	if (morse_ps_is_busy_pin_asserted(mors))
+		return; /* device already indicating busy - don't wait the delay */
+
+	mdelay(morse_ps_get_wakeup_delay_ms(mors));
 }
 
 static int morse_ps_wakeup(struct morse_ps *mps)
 {
-	int ret;
+	struct morse *mors = container_of(mps, struct morse, ps);
 
-	mutex_lock(&mps->lock);
-	ret = __morse_ps_wakeup(mps);
-	mutex_unlock(&mps->lock);
+	if (!mps->enable)
+		return 0;
 
-	return ret;
+	if (!mps->suspended)
+		return 0;
+
+	morse_ps_set_wake_gpio(mors, true);
+	morse_ps_wait_after_wake_pin_raise(mors);
+	morse_set_bus_enable(mors, true);
+	mps->suspended = false;
+	return 0;
 }
 
-static int __morse_ps_sleep(struct morse_ps *mps)
+static int morse_ps_sleep(struct morse_ps *mps)
 {
 	struct morse *mors = container_of(mps, struct morse, ps);
 
-	if (mps->enable && !mps->suspended) {
-		MORSE_PS_DBG(mors, "%s: Wakeup Pin Clear\n", __func__);
-		mps->suspended = true;
-		/* Disable SDIO bus and start getting interrupts */
-		morse_set_bus_enable(mors, false);
+	if (!mps->enable)
+		return 0;
 
-		/* we are  asleep, bring wakeup pin up */
-		if (mors->cfg->mm_ps_gpios_supported)
-			gpio_direction_output(mors->cfg->mm_wake_gpio, 0);
-	}
+	if (mps->suspended)
+		return 0;
 
+	mps->suspended = true;
+	morse_set_bus_enable(mors, false);
+	morse_ps_set_wake_gpio(mors, false);
 	return 0;
 }
 
@@ -98,11 +115,15 @@ static irqreturn_t morse_ps_irq_handle(int irq, void *arg)
 
 static void morse_ps_async_wake_work(struct work_struct *work)
 {
-	struct morse_ps *mps = container_of(work,
-					    struct morse_ps, async_wake_work);
+	struct morse_ps *mps = container_of(work, struct morse_ps, async_wake_work);
+	struct morse *mors = container_of(mps, struct morse, ps);
 
-	/* We are here because the chip asked use to wakeup */
+	if (!morse_ps_is_busy_pin_asserted(mors))
+		return;
+
+	mutex_lock(&mps->lock);
 	morse_ps_wakeup(mps);
+	mutex_unlock(&mps->lock);
 }
 
 void morse_ps_bus_activity(struct morse *mors, int timeout_ms)
@@ -112,7 +133,7 @@ void morse_ps_bus_activity(struct morse *mors, int timeout_ms)
 	mutex_unlock(&mors->ps.lock);
 }
 
-int __morse_ps_evaluate(struct morse_ps *mps)
+static int morse_ps_evaluate(struct morse_ps *mps)
 {
 	struct morse *mors = container_of(mps, struct morse, ps);
 	bool needs_wake = false;
@@ -143,18 +164,13 @@ int __morse_ps_evaluate(struct morse_ps *mps)
 	}
 
 	if (needs_wake) {
-		__morse_ps_wakeup(mps);
+		morse_ps_wakeup(mps);
+	} else if (morse_ps_is_busy_pin_asserted(mors)) {
+		/* Chip has something to send across the bus, re-evaluate later */
+		eval_later = true;
 	} else {
-		if (mors->cfg->mm_ps_gpios_supported) {
-			if (!morse_ps_is_busy_pin_asserted(mors)) {
-				__morse_ps_sleep(mps);
-			} else {
-				/* Chip has something to send across the bus, re-evaluate later */
-				eval_later |= true;
-			}
-		} else {
-			__morse_ps_sleep(mps);
-		}
+		MORSE_WARN_ON(FEATURE_ID_POWERSAVE, eval_later);
+		morse_ps_sleep(mps);
 	}
 
 	if (eval_later) {
@@ -185,7 +201,7 @@ static void morse_ps_evaluate_work(struct work_struct *work)
 
 	mutex_lock(&mps->lock);
 	MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
-	__morse_ps_evaluate(mps);
+	morse_ps_evaluate(mps);
 	mutex_unlock(&mps->lock);
 }
 
@@ -205,7 +221,7 @@ int morse_ps_enable(struct morse *mors)
 	} else {
 		mps->wakers--;
 		MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
-		ret = __morse_ps_evaluate(mps);
+		ret = morse_ps_evaluate(mps);
 	}
 
 	mutex_unlock(&mps->lock);
@@ -224,7 +240,7 @@ int morse_ps_disable(struct morse *mors)
 	mutex_lock(&mps->lock);
 	mps->wakers++;
 	MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
-	ret = __morse_ps_evaluate(mps);
+	ret = morse_ps_evaluate(mps);
 	mutex_unlock(&mps->lock);
 
 	return ret;
@@ -237,7 +253,7 @@ int morse_ps_init(struct morse *mors, bool enable, bool enable_dynamic_ps)
 	struct morse_ps *mps = &mors->ps;
 
 	mps->enable = enable;
-	mps->bus_ps_timeout = 0;
+	mps->bus_ps_timeout = jiffies;
 	mps->dynamic_ps_en = enable_dynamic_ps;
 	mps->suspended = false;
 	mps->wakers = 1;	/* we default to being on */

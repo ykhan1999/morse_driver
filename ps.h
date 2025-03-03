@@ -20,9 +20,21 @@ static inline int morse_network_bus_timeout(struct morse *mors)
 	return mors->uapsd_per_ac ? UAPSD_NETWORK_BUS_TIMEOUT_MS : NETWORK_BUS_TIMEOUT_MS;
 }
 
-int morse_ps_enable(struct morse *mors);
-
+/**
+ * morse_ps_disable() - Raise the wake line, forcing the chip to wake up from powersave.
+ * @mors: Morse chip instance
+ *
+ * Uses a reference counting mechanism for reentrancy.
+ * Each call to morse_ps_disable() should be paired with a call to morse_ps_enable()
+ * allowing the chip to go back to sleep when the operation is finished.
+ */
 int morse_ps_disable(struct morse *mors);
+
+/**
+ * morse_ps_enable() - Release the wake line, allowing the chip to go to sleep.
+ * @mors: Morse chip instance
+ */
+int morse_ps_enable(struct morse *mors);
 
 /**
  * Call this function when there is activity on the bus that should

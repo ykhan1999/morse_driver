@@ -32,6 +32,7 @@ struct morse_bus_ops {
 	int (*skb_tx)(struct morse *mors, struct sk_buff *skb, u8 channel);
 	int (*reset)(struct morse *mors);
 	void (*set_bus_enable)(struct morse *mors, bool enable);
+	void (*config_burst_mode)(struct morse *mors, bool enable_burst);
 	void (*claim)(struct morse *mors);
 	void (*set_irq)(struct morse *mors, bool enable);
 	void (*release)(struct morse *mors);
@@ -97,6 +98,7 @@ int morse_skb_tx(struct morse *mors, struct sk_buff *skb, u8 channel);
 enum morse_host_bus_type {
 	MORSE_HOST_BUS_TYPE_SDIO,
 	MORSE_HOST_BUS_TYPE_SPI,
+	MORSE_HOST_BUS_TYPE_USB,
 };
 
 #endif /* !_MORSE_BUS_H_ */

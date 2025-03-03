@@ -47,6 +47,8 @@ static const char * const morse_log_features[] = {
 	[FEATURE_ID_HWSCAN] = "hwscan",
 	[FEATURE_ID_COREDUMP] = "coredump",
 	[FEATURE_ID_BEACON] = "beacon",
+	[FEATURE_ID_YAPS] = "yaps",
+	[FEATURE_ID_USB] = "usb",
 };
 
 /*
@@ -363,6 +365,25 @@ static int read_file_pagesets(struct seq_file *file, void *data)
 	return 0;
 }
 
+static int read_file_yaps(struct seq_file *file, void *data)
+{
+	struct morse *mors = dev_get_drvdata(file->private);
+
+	morse_yaps_show(mors->chip_if->yaps, file);
+
+	return 0;
+}
+
+#ifdef MORSE_YAPS_SUPPORTS_BENCHMARK
+static int read_file_yaps_benchmark(struct seq_file *file, void *data)
+{
+	struct morse *mors = dev_get_drvdata(file->private);
+
+	morse_yaps_benchmark(mors, file);
+
+	return 0;
+}
+#endif
 
 static int read_skbq_mon_tbl(struct seq_file *file, void *data)
 {
@@ -538,7 +559,9 @@ static ssize_t morse_debug_bus_reset_write(struct file *file, const char __user 
 
 static const struct file_operations bus_reset_fops = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.write = morse_debug_bus_reset_write,
 };
 
@@ -558,7 +581,9 @@ static ssize_t morse_debug_driver_restart_write(struct file *file, const char __
 
 static const struct file_operations driver_restart_fops = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.write = morse_debug_driver_restart_write,
 };
 
@@ -586,7 +611,9 @@ static ssize_t morse_debug_watchdog_write(struct file *file, const char __user *
 
 static const struct file_operations watchdog_fops = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.write = morse_debug_watchdog_write,
 };
 
@@ -604,7 +631,9 @@ static ssize_t morse_debug_reset_required_read(struct file *file,
 
 static const struct file_operations reset_required_fops = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.read = morse_debug_reset_required_read,
 };
 
@@ -801,7 +830,9 @@ static void morse_debug_fw_hostif_log_destroy(struct morse *mors)
 static const struct file_operations fw_hostif_log_fops = {
 	.open = morse_debug_fw_hostif_log_open,
 	.release = morse_debug_fw_hostif_log_release,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.read = morse_debug_fw_hostif_log_read,
 };
 
@@ -831,7 +862,9 @@ static ssize_t morse_debug_hostif_log_config_read(struct file *file, char __user
 
 static const struct file_operations fw_hostif_log_config_fops = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.write = morse_debug_hostif_log_config_write,
 	.read = morse_debug_hostif_log_config_read
 };
@@ -1014,6 +1047,14 @@ int morse_init_debug(struct morse *mors)
 	if (mors->chip_if->active_chip_if == MORSE_CHIP_IF_PAGESET)
 		debugfs_create_devm_seqfile(mors->dev, "pagesets",
 					    mors->debug.debugfs_phy, read_file_pagesets);
+	else if (mors->chip_if->active_chip_if == MORSE_CHIP_IF_YAPS) {
+		debugfs_create_devm_seqfile(mors->dev, "yaps",
+					    mors->debug.debugfs_phy, read_file_yaps);
+#ifdef MORSE_YAPS_SUPPORTS_BENCHMARK
+		debugfs_create_devm_seqfile(mors->dev, "yaps_benchmark",
+					    mors->debug.debugfs_phy, read_file_yaps_benchmark);
+#endif
+	}
 
 	debugfs_create_devm_seqfile(mors->dev, "skbq_mon",
 				    mors->debug.debugfs_phy, read_skbq_mon_tbl);

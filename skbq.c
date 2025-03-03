@@ -152,6 +152,15 @@ morse_skb_tx_status_to_tx_control(struct morse *mors, struct sk_buff *skb,
 }
 #endif /* CONFIG_MORSE_RC */
 
+void morse_set_max_skb_txq_len(int new_max_txq_len)
+{
+	/* Max skb TX queue length is already higher than updated value. */
+	if (max_txq_len > new_max_txq_len)
+		return;
+
+	max_txq_len = new_max_txq_len;
+}
+
 static inline u32 __morse_skbq_size(const struct morse_skbq *mq)
 {
 	return mq->skbq_size;
@@ -457,6 +466,9 @@ static void morse_skbq_dispatch_work(struct work_struct *dispatch_work)
 		case MORSE_SKB_CHAN_LOOPBACK:
 			dev_kfree_skb_any(pfirst);
 			break;
+		case MORSE_SKB_CHAN_WIPHY:
+			morse_wiphy_rx(mors, pfirst);
+			break;
 		default:
 			morse_mac_skb_recv(mors, pfirst, &hdr->rx_status);
 			break;
@@ -487,6 +499,10 @@ int morse_skbq_put(struct morse_skbq *mq, struct sk_buff *skb)
 
 static inline void morse_flush_txskb(struct morse *mors, struct sk_buff *skb)
 {
+	if (is_fullmac_mode()) {
+		dev_kfree_skb_any(skb);
+		return;
+	}
 	ieee80211_free_txskb(mors->hw, skb);
 }
 
@@ -647,6 +663,8 @@ void morse_skbq_stop_tx_queues(struct morse *mors)
 	if (!mors->started)
 		return;
 
+	if (is_fullmac_mode())
+		return;
 
 	/* Wake/Stop mac80211 queues is not needed when using pull interface */
 	if (mors->custom_configs.enable_airtime_fairness)
@@ -672,6 +690,8 @@ void morse_skbq_may_wake_tx_queues(struct morse *mors)
 	if (!mors->started)
 		return;
 
+	if (is_fullmac_mode())
+		return;
 
 	/* Wake/Stop mac80211 queues is not needed when using pull interface */
 	if (mors->custom_configs.enable_airtime_fairness)
@@ -704,7 +724,6 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 	struct morse *mors = mq->mors;
 	bool mq_over_threshold;
 	int rc;
-	struct morse_buff_skb_header *hdr = (struct morse_buff_skb_header *)skb->data;
 
 	/* TODO data Alignment */
 	spin_lock_bh(&mq->lock);
@@ -731,6 +750,7 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 
 #ifdef CONFIG_MORSE_IPMON
 	{
+		struct morse_buff_skb_header *hdr = (struct morse_buff_skb_header *)skb->data;
 		static u64 time_start;
 
 		if (channel == MORSE_SKB_CHAN_DATA)
@@ -752,12 +772,6 @@ static int morse_skbq_tx(struct morse_skbq *mq, struct sk_buff *skb, u8 channel)
 		break;
 	case MORSE_SKB_CHAN_MGMT:
 		set_bit(MORSE_TX_MGMT_PEND, &mors->chip_if->event_flags);
-		queue_work(mors->chip_wq, &mors->chip_if_work);
-		break;
-	case MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON:
-		set_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, &mors->chip_if->event_flags);
-		/* Overwrite the channel to the actual channel what target understands */
-		hdr->channel = MORSE_SKB_CHAN_BEACON;
 		queue_work(mors->chip_wq, &mors->chip_if_work);
 		break;
 	case MORSE_SKB_CHAN_BEACON:
@@ -1170,7 +1184,7 @@ static void morse_skbq_tx_status_fill(struct morse *mors,
 		txi->status.ampdu_ack_len = txi->flags & IEEE80211_TX_STAT_ACK ? 1 : 0;
 	}
 
-	ieee80211_tx_status(mors->hw, skb);
+	MORSE_IEEE80211_TX_STATUS(mors->hw, skb);
 }
 #endif /* CONFIG_MORSE_RC */
 

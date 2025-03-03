@@ -16,6 +16,7 @@
 #include "skbq.h"
 #include "pager_if.h"
 #include "chip_if.h"
+#include "pageset_trace.h"
 
 /*
  * A pageset uses a pair of pagers to implement the paging system
@@ -88,6 +89,10 @@ struct morse_pageset {
 
 	DECLARE_KFIFO(reserved_pages, struct morse_page, CMD_RSVED_KFIFO_LEN);
 	DECLARE_KFIFO(cached_pages, struct morse_page, CACHED_PAGES_KFIFO_LEN);
+
+#ifdef CONFIG_MORSE_PAGESET_TRACE
+	struct pageset_trace trace;
+#endif
 };
 
 /**

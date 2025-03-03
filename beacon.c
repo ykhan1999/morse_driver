@@ -135,33 +135,6 @@ static void morse_beacon_fill_tx_info(struct morse *mors, struct morse_skb_tx_in
 		tx_info->flags |= cpu_to_le32(MORSE_TX_CONF_FLAGS_IMMEDIATE_REPORT);
 }
 
-/**
- * morse_is_time_critical_beacon() - Checks if the beacon contains ECSA/Page Slice IEs
- * or TIM with traffic indicator bit set.
- *
- * @mors_vif: Pointer to morse interface
- * @ies_mask: Beacon information elements.
- *
- * Return: True if time critical beacon or false.
- */
-static bool morse_is_time_critical_beacon(struct morse_vif *mors_vif,
-	struct dot11ah_ies_mask *ies_mask)
-{
-	struct ieee80211_tim_ie *tim = (struct ieee80211_tim_ie *)ies_mask->ies[WLAN_EID_TIM].ptr;
-
-	if (ies_mask->ies[WLAN_EID_EXT_CHANSWITCH_ANN].ptr)
-		return true;
-
-	if (ies_mask->ies[WLAN_EID_PAGE_SLICE].ptr)
-		return true;
-
-	/* Check if broadcast/multicast data is buffered */
-	if (tim && (tim->bitmap_ctrl & 0x1))
-		return true;
-
-	return false;
-}
-
 static void morse_beacon_tasklet(unsigned long data)
 {
 	struct morse_skbq *mq;
@@ -379,7 +352,7 @@ static void morse_beacon_tasklet(unsigned long data)
 		}
 
 		/* Just say we transmitted it */
-		ieee80211_tx_status(mors->hw, beacon);
+		MORSE_IEEE80211_TX_STATUS(mors->hw, beacon);
 		beacon = skb2;
 	}
 
@@ -408,11 +381,11 @@ static void morse_beacon_tasklet(unsigned long data)
 	    mors->custom_configs.channel_info.op_bw_mhz :
 	    mors->custom_configs.channel_info.pri_bw_mhz;
 	morse_beacon_fill_tx_info(mors, &tx_info, beacon, mors_vif, tx_bw_mhz);
-	if (morse_is_time_critical_beacon(mors_vif, ies_mask))
-		morse_skbq_skb_tx(mq, &beacon, &tx_info,
-				MORSE_SKB_CHAN_INTERNAL_CRIT_BEACON);
-	else
-		morse_skbq_skb_tx(mq, &beacon, &tx_info, MORSE_SKB_CHAN_BEACON);
+	morse_skbq_skb_tx(mq, &beacon, &tx_info, MORSE_SKB_CHAN_BEACON);
+
+	/* Wake up pageset handler */
+	mors->beacon_queued = true;
+	wake_up(&mors->beacon_tasklet_waitq);
 
 	/* TODO: currently due to the way we implement firmware beaconing,
 	 * these might still get sent before the DTIM beacon.
@@ -448,7 +421,7 @@ void morse_beacon_irq_handle(struct morse *mors, u32 status)
 	spin_unlock_bh(&mors->vif_list_lock);
 }
 
-int morse_beacon_irq_enable(struct morse_vif *mors_vif, bool enable)
+static int morse_beacon_irq_enable(struct morse_vif *mors_vif, bool enable)
 {
 	struct morse *mors = morse_vif_to_morse(mors_vif);
 	u8 beacon_irq_num = MORSE_INT_BEACON_BASE_NUM + mors_vif->id;

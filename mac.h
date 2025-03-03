@@ -42,12 +42,21 @@ void morse_mac_update_custom_s1g_capab(struct morse_vif *mors_vif,
 int morse_mac_pkt_to_s1g(struct morse *mors, struct morse_sta *mors_sta,
 			 struct sk_buff **skb, int *tx_bw_mhz);
 
+/**
+ * morse_mac_ps_enabled() - Check whether powersave can be enabled.
+ * @mors: Global Morse structure
+ *
+ * Return: true if powersave can be enabled.
+ */
+bool morse_mac_ps_enabled(struct morse *mors);
+
 int morse_mac_watchdog_create(struct morse *mors);
 void morse_mac_mcs0_10_stats_dump(struct morse *mors, struct seq_file *file);
 void morse_mac_fill_tx_info(struct morse *mors, struct morse_skb_tx_info *tx_info,
 				   struct sk_buff *skb, struct ieee80211_vif *vif,
 				   int tx_bw_mhz, struct ieee80211_sta *sta);
 
+bool is_fullmac_mode(void);
 bool is_thin_lmac_mode(void);
 bool is_virtual_sta_test_mode(void);
 bool is_sw_crypto_mode(void);

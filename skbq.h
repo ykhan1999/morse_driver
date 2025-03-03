@@ -60,6 +60,13 @@ void morse_skb_remove_hdr_after_sent_to_chip(struct sk_buff *skb);
 void morse_skbq_mon_dump(struct morse *mors, struct seq_file *file);
 
 /**
+ * @brief Set the max SKB TX queue length.
+ *
+ * @new_max_txq_len Modified max skb TX queue length.
+ */
+void morse_set_max_skb_txq_len(int new_max_txq_len);
+
+/**
  * @brief Unlink a given SKB from mq->pending, and perform Q specific
  *        'finish' processing on the SKB.
  *

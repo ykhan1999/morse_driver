@@ -691,5 +691,8 @@ int morse_mesh_init(struct morse_vif *mors_vif)
 	mesh->dynamic_peering = DEFAULT_DYNAMIC_MESH_PEERING;
 	mesh->rssi_margin = DEFAULT_MESH_RSSI_MARGIN;
 	mesh->blacklist_timeout = DEFAULT_MESH_BLACKLIST_TIMEOUT;
+
+	morse_set_max_skb_txq_len(MORSE_MESH_MAX_TXQ_LENGTH);
+
 	return 0;
 }

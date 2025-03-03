@@ -53,6 +53,11 @@
 #define MORSE_MESH_MAX_BEACON_INFO_ENTRIES	20
 
 /**
+ * Maximum number of queued TX packets for Mesh
+ */
+#define MORSE_MESH_MAX_TXQ_LENGTH 256
+
+/**
  * Neighbor entry validity time in terms of TUs as per standard
  * Ref:802.11-2020 section 14.13.4.2.3 Beacon timing information.
  */

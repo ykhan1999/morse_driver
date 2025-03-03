@@ -371,8 +371,14 @@ struct morse_dot11ah_cssid_item {
 	u16 beacon_int;
 };
 
+/*
+ * This table is also in hostap.
+ * The presence of a regdom does not mean that it is necessarily
+ * supported in the firmware.
+ */
 enum morse_dot11ah_region {
 	MORSE_AU,
+	MORSE_CA,
 	MORSE_EU,
 	MORSE_IN,
 	MORSE_JP,
@@ -396,6 +402,11 @@ struct morse_channel_info {
 	u8 s1g_operating_class;
 	/** Primary channel S1G operating class */
 	u8 pri_global_operating_class;
+	/** S1G Capabilities */
+	u8 s1g_cap0;
+	u8 s1g_cap1;
+	u8 s1g_cap2;
+	u8 s1g_cap3;
 };
 
 struct dot11ah_short_beacon_ie {
@@ -545,7 +556,7 @@ struct morse_reg_rule {
 struct morse_regdomain {
 	u32 n_reg_rules;
 	char alpha2[3];
-	struct morse_reg_rule reg_rules[];
+	struct morse_reg_rule *reg_rules;
 };
 
 int morse_dot11ah_s1g_to_11n_rx_packet_size(struct ieee80211_vif *vif,
@@ -600,7 +611,8 @@ u8 *morse_dot11_insert_ie_from_ies_mask(u8 *pos, const struct dot11ah_ies_mask *
 void morse_dot11ah_11n_to_s1g_tx_packet(struct ieee80211_vif *vif,
 	struct sk_buff *skb, int s1g_length, bool short_beacon, struct dot11ah_ies_mask *ies_mask);
 
-bool morse_mac_find_channel_info_for_bssid(u8 bssid[ETH_ALEN], struct morse_channel_info *info);
+bool morse_mac_find_channel_info_for_bssid(const u8 bssid[ETH_ALEN],
+					   struct morse_channel_info *info);
 
 int morse_dot11_find_bssid_on_channel(u32 op_chan_freq_hz, u8 bssid[ETH_ALEN]);
 
@@ -672,7 +684,7 @@ u32 morse_dot11ah_channel_get_flags(int chan_s1g);
  */
 struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid_item_for_bssid(const u8 bssid[ETH_ALEN]);
 
-struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN]);
+struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(const u8 bssid[ETH_ALEN]);
 
 /**
  * morse_dot11ah_store_cssid() - Stores BSS information and S1G IEs.

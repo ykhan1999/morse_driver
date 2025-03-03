@@ -10,21 +10,28 @@
 #include "morse.h"
 #include "mac.h"
 #include "rc.h"
+#include "debug.h"
 #include "mmrc-submodule/src/core/mmrc.h"
 
-void morse_print_station_stats(struct morse_sta *msta, struct seq_file *file)
+static void morse_print_station_stats(struct morse_sta *msta, struct seq_file *file)
 {
 	u32 last_tx_rate_kbps;
 	u32 last_rx_rate_kbps;
+	struct morse_skb_rx_status *status = &msta->last_rx.data_status;
 
-	msta->last_sta_rx_rate.guard = morse_ratecode_sgi_get(msta->last_rx_status.morse_ratecode);
-	msta->last_sta_rx_rate.flags = morse_ratecode_rts_get(msta->last_rx_status.morse_ratecode);
+	if (!msta->last_rx.is_data_set) {
+		seq_printf(file, "Mesh Peer link %pM (rc unknown)\n", msta->addr);
+		return;
+	}
+
+	msta->last_sta_rx_rate.guard = morse_ratecode_sgi_get(status->morse_ratecode);
+	msta->last_sta_rx_rate.flags = morse_ratecode_rts_get(status->morse_ratecode);
 	msta->last_sta_rx_rate.rate =
-	    morse_ratecode_mcs_index_get(msta->last_rx_status.morse_ratecode);
+	    morse_ratecode_mcs_index_get(status->morse_ratecode);
 	msta->last_sta_rx_rate.ss =
-	    morse_ratecode_nss_index_get(msta->last_rx_status.morse_ratecode);
+	    morse_ratecode_nss_index_get(status->morse_ratecode);
 	msta->last_sta_rx_rate.bw =
-	    morse_ratecode_bw_index_get(msta->last_rx_status.morse_ratecode);
+	    morse_ratecode_bw_index_get(status->morse_ratecode);
 
 	last_tx_rate_kbps =
 	    BPS_TO_KBPS(mmrc_calculate_theoretical_throughput(msta->last_sta_tx_rate));
@@ -46,7 +53,7 @@ void morse_print_station_stats(struct morse_sta *msta, struct seq_file *file)
 		   morse_ratecode_bw_index_to_s1g_bw_mhz(msta->last_sta_rx_rate.bw),
 		   msta->last_sta_rx_rate.ss,
 		   msta->last_sta_rx_rate.guard ? "short GI" : "long GI");
-	seq_printf(file, "    RSSI: %d dBm\n", (s8)le16_to_cpu(msta->last_rx_status.rssi));
+	seq_printf(file, "    RSSI: %d dBm\n", (s8)le16_to_cpu(status->rssi));
 }
 
 static int mesh_stats_read(struct seq_file *file, void *data)
@@ -279,7 +286,9 @@ static ssize_t set_fixed_rate(struct file *file, const char __user *user_buf,
 
 static const struct file_operations mmrc_fixed_rate = {
 	.open = simple_open,
+#if KERNEL_VERSION(6, 12, 0) > LINUX_VERSION_CODE
 	.llseek = no_llseek,
+#endif
 	.write = set_fixed_rate,
 };
 

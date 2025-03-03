@@ -147,6 +147,43 @@ int morse_mac_event_recv(struct morse *mors, struct sk_buff *skb)
 			ret = morse_evt_ocs_done(ieee80211_vif_to_morse_vif(vif), event);
 			break;
 		}
+	case MORSE_COMMAND_EVT_SCAN_RESULT:
+		{
+			struct morse_evt_scan_result *scan_result =
+			    (struct morse_evt_scan_result *)event;
+
+			ret = morse_wiphy_scan_result(mors, scan_result);
+
+			break;
+		}
+	case MORSE_COMMAND_EVT_SCAN_DONE:
+		{
+			struct morse_evt_scan_done *scan_done = (struct morse_evt_scan_done *)event;
+
+			morse_wiphy_scan_done(mors, scan_done->aborted);
+
+			ret = 0;
+
+			break;
+		}
+	case MORSE_COMMAND_EVT_CONNECTED:
+		{
+			struct morse_evt_connected *connected = (struct morse_evt_connected *)event;
+
+			morse_wiphy_connected(mors, connected->bssid);
+
+			ret = 0;
+
+			break;
+		}
+	case MORSE_COMMAND_EVT_DISCONNECTED:
+		{
+			morse_wiphy_disconnected(mors);
+
+			ret = 0;
+
+			break;
+		}
 	case MORSE_COMMAND_EVT_HW_SCAN_DONE:
 		{
 			morse_hw_scan_done_event(mors->hw);

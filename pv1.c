@@ -55,10 +55,12 @@ static int32_t morse_pv1_retrieve_tx_bpn(struct morse_vif *mors_vif,
  * morse_mac_process_hc_request - Process Header Compression Request frame and
  *                  schedules response
  *
- * @mors_vif:     Morse VIF on which request is received
+ * @mors_vif:     Virtual interface
  * @ie_data:      Header Compression IE data
- * @sta:          Peer STA to from which request is received
+ * @sta:          Peer STA from which the request was received
  * @dialog_token: Dialog token from request action frame
+ *
+ * @note:         The RCU lock must be held when calling this function.
  */
 static void morse_mac_process_hc_request(struct morse *mors, struct morse_vif *mors_vif,
 			struct dot11ah_pv1_header_compression *ie_data, struct ieee80211_sta *sta,
@@ -70,17 +72,14 @@ static void morse_mac_process_hc_request(struct morse *mors, struct morse_vif *m
 	u8 *ptr = (uint8_t *)ie_data->variable;
 	struct morse_pv1_hc_request *rx_request;
 
-	if (!mors_vif->enable_pv1)
-		return;
-
 	mutex_lock(&mors_vif->pv1.lock);
+
 	rx_request = &mors_vif->pv1.rx_request;
 	mors_vif->pv1.fw_stored_response_status = false;
 	rx_request->a1_a3_differ = store_a3;
 	rx_request->a2_a4_differ = store_a4;
 	rx_request->action_dialog_token = dialog_token;
-	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
-	mors_vif->pv1.rx_pv1_sta = sta;
+	memcpy(mors_vif->pv1.rx_pv1_sta_addr, sta->addr, ETH_ALEN);
 
 	if (store_a3) {
 		memcpy(rx_request->header_compression_a3, ptr,
@@ -94,6 +93,7 @@ static void morse_mac_process_hc_request(struct morse *mors, struct morse_vif *m
 	}
 
 	schedule_work(&mors_vif->pv1.hc_req_work);
+
 	mutex_unlock(&mors_vif->pv1.lock);
 }
 
@@ -101,35 +101,28 @@ static void morse_mac_process_hc_request(struct morse *mors, struct morse_vif *m
  * morse_mac_process_hc_response - Process Header Compression Response frame on RX
  *
  * @mgmt:        Received response frame
- * @vif:         Valid VIF
+ * @mors_vif:    Virtual interface
  * @hc_ie_data:  Response IE data
+ * @sta:         Peer STA from which the response was received
+ *
+ * @note:        The RCU lock must be held when calling this function.
  */
 static void morse_mac_process_hc_response(struct morse_dot11ah_s1g_action *mgmt,
-		struct ieee80211_vif *vif, struct dot11ah_pv1_header_compression *hc_ie_data)
+		struct ieee80211_vif *vif, struct dot11ah_pv1_header_compression *hc_ie_data,
+		struct ieee80211_sta *sta)
 {
-	struct ieee80211_sta *sta;
 	struct morse_sta *mors_sta;
 	struct morse_sta_pv1 *resp_status;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 
-	if (!mors_vif->enable_pv1)
-		return;
-
-	/* Must be held while finding and dereferencing sta */
-	rcu_read_lock();
-
-	sta = ieee80211_find_sta(vif, mgmt->sa);
-	if (!sta)
-		goto exit;
-
 	mors_sta = (struct morse_sta *)sta->drv_priv;
 
 	if (!mors_sta || !mors_sta->pv1_frame_support)
-		goto exit;
+		return;
 
 	resp_status = &mors_sta->tx_pv1_ctx;
 	if (!resp_status)
-		goto exit;
+		return;
 
 	resp_status->a3_stored = hc_ie_data->header_compression_control &
 				DOT11AH_PV1_HEADER_COMPRESSION_STORE_A3;
@@ -137,6 +130,7 @@ static void morse_mac_process_hc_response(struct morse_dot11ah_s1g_action *mgmt,
 				DOT11AH_PV1_HEADER_COMPRESSION_STORE_A4;
 
 	mutex_lock(&mors_vif->pv1.lock);
+
 	if (mors_vif->pv1.tx_request.action_in_progress) {
 		mors_vif->pv1.tx_request.action_in_progress = false;
 		mors_vif->pv1.hc_response_timeout = jiffies;
@@ -154,14 +148,12 @@ static void morse_mac_process_hc_response(struct morse_dot11ah_s1g_action *mgmt,
 			memset(resp_status->stored_a4, 0, sizeof(resp_status->stored_a4));
 	}
 
-	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
-	mors_vif->pv1.tx_pv1_sta = sta;
+	memcpy(mors_vif->pv1.tx_pv1_sta_addr, sta->addr, ETH_ALEN);
 
 	if (resp_status->a3_stored || resp_status->a4_stored)
 		schedule_work(&mors_vif->pv1.hc_resp_work);
+
 	mutex_unlock(&mors_vif->pv1.lock);
-exit:
-	rcu_read_unlock();
 }
 
 void morse_mac_process_pv1_action_frame(struct morse_dot11ah_s1g_action *mgmt,
@@ -199,7 +191,7 @@ void morse_mac_process_pv1_action_frame(struct morse_dot11ah_s1g_action *mgmt,
 		goto exit;
 
 	if (is_response)
-		morse_mac_process_hc_response(mgmt, vif, hc_ie_data);
+		morse_mac_process_hc_response(mgmt, vif, hc_ie_data, sta);
 	else
 		morse_mac_process_hc_request(mors, mors_vif, hc_ie_data, sta, dialog_token);
 exit:
@@ -236,7 +228,7 @@ void morse_pv1_a3_a4_check(struct morse_vif *mors_vif, struct ieee80211_sta *pub
 }
 
 void morse_mac_send_pv1_hc_action_frame(struct morse *mors,
-			struct ieee80211_vif *vif, struct ieee80211_sta *sta, int no_hwcrypt,
+			struct ieee80211_vif *vif, struct ieee80211_sta *sta,
 			struct sk_buff *skb_data, bool is_response)
 {
 	struct sk_buff *skb;
@@ -276,8 +268,8 @@ void morse_mac_send_pv1_hc_action_frame(struct morse *mors,
 	sta_resp_status = &mors_sta->tx_pv1_ctx;
 	timeout = jiffies - mors_vif->pv1.hc_response_timeout;
 
-	/* The action frames send based on the decisions:
-	 * If Response - Always send as the requestor is waiting for response
+	/* The action frames are sent based on:
+	 * If Response - always send as the requestor is waiting for response
 	 * If Request
 	 * 1. Previous action is in progress and the response wait period has timed out
 	 * 2. Both A3 and A4 does not differ and previously stored A3 and A3 has some address
@@ -318,9 +310,9 @@ void morse_mac_send_pv1_hc_action_frame(struct morse *mors,
 	memset(action, 0, sizeof(*action));
 
 	if (sta && sta->mfp) {
-		if (no_hwcrypt) {
+		if (is_sw_crypto_mode()) {
 			MORSE_ERR_RATELIMITED(mors,
-					      "Can't send protected action frame with soft encryption\n");
+			      "Can't send protected action frame with software encryption\n");
 			morse_mac_skb_free(mors, skb);
 			goto end;
 		}
@@ -548,7 +540,7 @@ static int morse_convert_pv0_to_pv1(struct morse *mors, struct morse_vif *mors_v
 	struct dot11ah_mac_pv1_hdr *pv1_mac_header =
 			(struct dot11ah_mac_pv1_hdr *)pv1_header_buf;
 	bool is_protected = pv0_fc & IEEE80211_FCTL_PROTECTED;
-	int bpn;
+	int bpn = 0;
 	u16 pv1_fc;
 	int pv1_header_length;
 	int pv0_hdr_len;
@@ -892,6 +884,74 @@ bool morse_is_pv1_protected_frame(struct sk_buff *skb)
 }
 
 /**
+ * morse_pv1_process_hc_req_work - Header Compression response workqueue handler
+ *
+ * @work:    Workqueue struct
+ */
+static void morse_pv1_process_hc_req_work(struct work_struct *work)
+{
+	struct morse_pv1 *pv1 = container_of(work, struct morse_pv1, hc_req_work);
+	struct morse_vif *mors_vif = container_of(pv1, struct morse_vif, pv1);
+	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
+	struct ieee80211_sta *sta;
+	struct morse *mors = morse_vif_to_morse(mors_vif);
+	struct morse_pv1_hc_request *rx_request = &mors_vif->pv1.rx_request;
+	struct morse_sta_pv1 *req_status;
+	struct morse_sta *mors_sta = NULL;
+	u8 *a3 = NULL;
+	u8 *a4 = NULL;
+	bool store_a3;
+	bool store_a4;
+
+	/* Must be held while finding and dereferencing sta */
+	rcu_read_lock();
+
+	sta = ieee80211_find_sta(vif, mors_vif->pv1.rx_pv1_sta_addr);
+	if (sta)
+		mors_sta = (struct morse_sta *)sta->drv_priv;
+	if (!mors_sta || !mors_sta->pv1_frame_support) {
+		rcu_read_unlock();
+		return;
+	}
+
+	req_status = &mors_sta->rx_pv1_ctx;
+	memset(req_status, 0, sizeof(*req_status));
+
+	store_a3 = rx_request->a1_a3_differ;
+	store_a4 = rx_request->a2_a4_differ;
+
+	mutex_lock(&mors->lock);
+
+	if (store_a3)
+		a3 = (u8 *)rx_request->header_compression_a3;
+
+	if (store_a4)
+		a4 = (u8 *)rx_request->header_compression_a4;
+
+	if (morse_cmd_store_pv1_hc_data(mors, mors_vif, sta, a3, a4, true)) {
+		rx_request->a1_a3_differ = false;
+		rx_request->a2_a4_differ = false;
+	} else {
+		mors_vif->pv1.fw_stored_response_status = true;
+		if (a3) {
+			req_status->a3_stored = true;
+			memcpy(req_status->stored_a3, a3, sizeof(req_status->stored_a3));
+		}
+
+		if (a4) {
+			req_status->a4_stored = true;
+			memcpy(req_status->stored_a4, a4, sizeof(req_status->stored_a4));
+		}
+	}
+
+	morse_mac_send_pv1_hc_action_frame(mors, vif, sta, NULL, 1);
+
+	mutex_unlock(&mors->lock);
+
+	rcu_read_unlock();
+}
+
+/**
  * morse_pv1_process_hc_resp_work - Header Compression response workqueue handler
  *
  * @work:    Workqueue struct
@@ -900,21 +960,24 @@ static void morse_pv1_process_hc_resp_work(struct work_struct *work)
 {
 	struct morse_pv1 *pv1 = container_of(work, struct morse_pv1, hc_resp_work);
 	struct morse_vif *mors_vif = container_of(pv1, struct morse_vif, pv1);
-	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
-	struct ieee80211_sta *sta = mors_vif->pv1.tx_pv1_sta;
+	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
+	struct ieee80211_sta *sta;
 	struct morse *mors = morse_vif_to_morse(mors_vif);
 	struct morse_sta_pv1 *resp_status;
-	struct morse_sta *mors_sta;
+	struct morse_sta *mors_sta = NULL;
 	u8 *a3 = NULL;
 	u8 *a4 = NULL;
 
-	if (!sta)
-		return;
+	/* Must be held while finding and dereferencing sta */
+	rcu_read_lock();
 
-	mors_sta = (struct morse_sta *)sta->drv_priv;
-
-	if (!mors_sta || !mors_sta->pv1_frame_support)
+	sta = ieee80211_find_sta(vif, mors_vif->pv1.tx_pv1_sta_addr);
+	if (sta)
+		mors_sta = (struct morse_sta *)sta->drv_priv;
+	if (!mors_sta || !mors_sta->pv1_frame_support) {
+		rcu_read_unlock();
 		return;
+	}
 
 	resp_status = &mors_sta->tx_pv1_ctx;
 
@@ -923,10 +986,12 @@ static void morse_pv1_process_hc_resp_work(struct work_struct *work)
 
 	if (a3 || a4)
 		morse_cmd_store_pv1_hc_data(mors, mors_vif, sta, a3, a4, false);
+
+	rcu_read_unlock();
 }
 
 int morse_mac_convert_pv0_to_pv1(struct morse *mors, struct morse_vif *mors_vif,
-		struct ieee80211_sta *sta, struct sk_buff *skb, int no_hwcrypt)
+		struct ieee80211_sta *sta, struct sk_buff *skb)
 {
 	struct morse_sta *mors_sta = (struct morse_sta *)sta->drv_priv;
 	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)(skb)->data;
@@ -948,7 +1013,7 @@ int morse_mac_convert_pv0_to_pv1(struct morse *mors, struct morse_vif *mors_vif,
 	}
 
 	morse_pv1_a3_a4_check(mors_vif, sta, skb);
-	morse_mac_send_pv1_hc_action_frame(mors, vif, sta, no_hwcrypt, skb, 0);
+	morse_mac_send_pv1_hc_action_frame(mors, vif, sta, skb, 0);
 	return morse_convert_pv0_to_pv1(mors, mors_vif, sta, skb);
 }
 

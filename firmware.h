@@ -10,9 +10,11 @@
 #include <linux/firmware.h>
 #include "capabilities.h"
 #include "misc.h"
+#include "yaps-hw.h"
 
 #define BCF_DATABASE_SIZE               (1024)	/* From firmware */
 #define MORSE_FW_DIR                    "morse"
+#define MORSE_FW_FULLMAC_STRING		"-flm"
 #define MORSE_FW_THIN_LMAC_STRING       "-tlm"
 #define MORSE_FW_VIRTUAL_STA_STRING     "-vst"
 #define MORSE_FW_EXT                    ".bin"
@@ -54,6 +56,7 @@ enum morse_fw_extended_host_table_tag {
 	MORSE_FW_HOST_TABLE_TAG_S1G_CAPABILITIES = 0,
 	MORSE_FW_HOST_TABLE_TAG_PAGER_BYPASS_TX_STATUS = 1,
 	MORSE_FW_HOST_TABLE_TAG_INSERT_SKB_CHECKSUM = 2,
+	MORSE_FW_HOST_TABLE_TAG_YAPS_TABLE = 3,
 	MORSE_FW_HOST_TABLE_TAG_PAGER_PKT_MEMORY = 4,
 };
 
@@ -109,6 +112,10 @@ struct extended_host_table_insert_skb_checksum {
 	u8 insert_and_validate_checksum;
 };
 
+struct extended_host_table_yaps_table {
+	struct extended_host_table_tlv_hdr header;
+	struct morse_yaps_hw_table yaps_table;
+} __packed;
 
 struct extended_host_table_pager_pkt_memory {
 	struct extended_host_table_tlv_hdr header;

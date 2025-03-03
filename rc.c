@@ -352,6 +352,7 @@ void morse_rc_reinit_stas(struct morse *mors, struct ieee80211_vif *vif)
 		int oper_bw_mhz = mors->custom_configs.channel_info.op_bw_mhz;
 		struct ieee80211_sta *sta =
 		    container_of((void *)msta, struct ieee80211_sta, drv_priv);
+		struct ieee80211_sta_vht_cap *vht_cap;
 
 		if (msta) {
 			MORSE_RC_INFO(mors,
@@ -363,6 +364,22 @@ void morse_rc_reinit_stas(struct morse *mors, struct ieee80211_vif *vif)
 		}
 
 		morse_rc_sta_remove(mors, sta);
+
+		/* Enable VHT Caps if STA supports it when moving to 8MHz channel, hostapd is
+		 * disabling 8MHz SGI Cap of associated STAs if it is brought up in 1/2/4 MHz
+		 * channel.
+		 */
+		if (oper_bw_mhz == 8) {
+			vht_cap = morse_mac_sta_vht_cap(sta);
+
+			if ((msta->s1g_cap0 & S1G_CAP0_SGI_8MHZ) &&
+				(mors_vif->ecsa_channel_info.s1g_cap0 & S1G_CAP0_SGI_8MHZ))
+				vht_cap->cap |= IEEE80211_VHT_CAP_SHORT_GI_160;
+
+			if ((msta->s1g_cap0 & S1G_CAP0_SUPP_CH_WIDTH) >= S1G_CAP0_SUPP_8MHZ)
+				vht_cap->cap |= IEEE80211_VHT_CAP_SUPP_CHAN_WIDTH_160MHZ;
+		}
+
 		morse_rc_sta_add(mors, vif, sta);
 
 		/* Set fixed rate */
@@ -507,6 +524,8 @@ void morse_rc_vif_update_mcast_rate(struct morse *mors, struct morse_vif *mors_v
 static bool morse_rc_use_basic_rates(struct ieee80211_sta *sta, struct sk_buff *skb,
 				     struct ieee80211_hdr *hdr)
 {
+	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+
 	if (!sta)
 		return true;
 
@@ -514,8 +533,9 @@ static bool morse_rc_use_basic_rates(struct ieee80211_sta *sta, struct sk_buff *
 		     !morse_dot11ah_is_pv1_qos_data(hdr->frame_control))
 		return true;
 
-	/* Use basic rates for EAPOL exchanges */
-	if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE)))
+	/* Use basic rates for EAPOL exchanges or when instructed */
+	if (unlikely((skb->protocol == cpu_to_be16(ETH_P_PAE) ||
+	    info->flags & IEEE80211_TX_CTL_USE_MINRATE)))
 		return true;
 
 	return false;
@@ -574,6 +594,8 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 		return;
 
 	ret = morse_rc_sta_get_rates(mors, msta, &rates, skb->len);
+	if (ret != 0)
+		return;
 
 	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
 		info->control.rates[i].flags = 0;
@@ -779,7 +801,7 @@ exit:
 	}
 
 	rcu_read_unlock();
-	ieee80211_tx_status(mors->hw, skb);
+	MORSE_IEEE80211_TX_STATUS(mors->hw, skb);
 }
 
 void morse_rc_sta_state_check(struct morse *mors,

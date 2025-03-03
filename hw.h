@@ -75,6 +75,8 @@
 					((mors)->cfg->regs->aon_latch)
 #define MORSE_REG_AON_LATCH_MASK(mors)	\
 					((mors)->cfg->regs->aon_latch_mask)
+#define MORSE_REG_AON_USB_RESET(mors) \
+					((mors)->cfg->regs->aon_reset_usb_value)
 
 /** Bit 17 to 24 reserved for the beacon VIF 0 to 7 interrupts */
 #define MORSE_INT_BEACON_VIF_MASK_ALL		(GENMASK(24, 17))
@@ -107,6 +109,34 @@
 #define MM6108A1_ID MORSE_DEVICE_ID(MM6108XX_ID, 3, CHIP_TYPE_SILICON)
 #define MM6108A2_ID MORSE_DEVICE_ID(MM6108XX_ID, 4, CHIP_TYPE_SILICON)
 
+/* Chip Id */
+#define MM8108XX_ID 0x9
+
+/* Chip Rev */
+#define MM8108B0_REV 0x6
+#define MM8108B1_REV 0x7
+#define MM8108B2_REV 0x8
+
+/* Chip Rev String */
+#define MM8108B_STRING "b"
+#define MM8108B0_REV_STRING MM8108B_STRING "0"
+#define MM8108B1_REV_STRING MM8108B_STRING "1"
+#define MM8108B2_REV_STRING MM8108B_STRING "2"
+
+/* Chip ID for MM8108 */
+#define MM8108B0_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B0_REV, CHIP_TYPE_SILICON)
+#define MM8108B1_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B1_REV, CHIP_TYPE_SILICON)
+#define MM8108B2_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B2_REV, CHIP_TYPE_SILICON)
+
+/* Chip ID for MM8108 - FPGA */
+#define MM8108B0_FPGA_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B0_REV, CHIP_TYPE_FPGA)
+#define MM8108B1_FPGA_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B1_REV, CHIP_TYPE_FPGA)
+#define MM8108B2_FPGA_ID MORSE_DEVICE_ID(MM8108XX_ID, MM8108B2_REV, CHIP_TYPE_FPGA)
+
+
+#define FW_RAM_ONLY_STRING ""
+#define FW_ROM_LINKED_STRING "-rl"
+#define FW_ROM_ALL_STRING "-ro"
 
 /* Last element to declare in valid_chip_ids[] */
 #define CHIP_ID_END		0xFFFFFFFF
@@ -170,6 +200,7 @@ struct morse_hw_regs {
 	u32 pager_base_address;
 	u32 aon_latch;
 	u32 aon_latch_mask;
+	u32 aon_reset_usb_value;
 	u32 aon;
 	u8 aon_count;
 };
@@ -212,7 +243,7 @@ struct morse_hw_cfg {
 	 *
 	 * @return inter_block_delay_ns
 	 */
-	int (*enable_sdio_burst_mode)(struct morse *mors);
+	int (*enable_sdio_burst_mode)(struct morse *mors, const u8 burst_mode);
 
 	/**
 	 * Perform necessary actions to prepare the chip before firmware load
@@ -250,17 +281,32 @@ struct morse_hw_cfg {
 	int (*pre_coredump_hook)(struct morse *mors, enum morse_coredump_method method);
 
 	/**
+	 * Invoke after creating coredump to restore chip settings.
+	 *
+	 * @return error code
+	 */
+	int (*post_coredump_hook)(struct morse *mors, enum morse_coredump_method method);
+
+	/**
+	 * enable_ext_xtal_delay: Enable external XTAL wait delays during bus transfers.
+	 *
+	 * @param mors: Morse context object
+	 * @param enable: true if delay is required
+	 */
+	void (*enable_ext_xtal_delay)(struct morse *mors, bool enable);
+
+	/**
 	 * @bus_double_read: Decide if the bus workaround is required to recover
 	 * the page header repeated words
 	 */
 	bool bus_double_read;
 
 	/**
-	 * @xtal_init_sdio_trans_delay_ms : An additional delay incurred if the device
+	 * @xtal_init_bus_trans_delay_ms : An additional delay incurred if the device
 	 * requires external (host) xtal initialisation. Once the XTAL is initialised,
 	 * this variable will get cleared to zero (no delay).
 	 */
-	unsigned int xtal_init_sdio_trans_delay_ms;
+	unsigned int xtal_init_bus_trans_delay_ms;
 
 	/**
 	 * @enable_short_bcn_as_dtim : Indicate if DTIM beacon should be a long beacon.
@@ -294,9 +340,23 @@ int morse_hw_irq_enable(struct morse *mors, u32 irq, bool enable);
 int morse_hw_irq_handle(struct morse *mors);
 int morse_hw_irq_clear(struct morse *mors);
 
+enum sdio_burst_mode {
+	SDIO_WORD_BURST_DISABLE = 0,	/* Intentionally duplicate to make it clear it's disabled */
+	SDIO_WORD_BURST_SIZE_0 = 0,	/* 000: no bursting (single 32bit word) */
+	SDIO_WORD_BURST_SIZE_2 = 1,	/* 001: bursts of 2 words */
+	SDIO_WORD_BURST_SIZE_4 = 2,	/* 010: bursts of 4 words */
+	SDIO_WORD_BURST_SIZE_8 = 3,	/* 011: bursts of 8 words */
+	SDIO_WORD_BURST_SIZE_16 = 4,	/* 100: bursts of 16 words */
+	SDIO_WORD_BURST_MASK = 7,
+};
+
 /* MM6108 */
 extern struct morse_chip_series mm61xx_chip_series;
 extern struct morse_hw_cfg mm6108_cfg;
+/* MM8108 */
+extern struct morse_chip_series mm81xx_chip_series;
+extern struct morse_hw_cfg mm8108_cfg;
+extern const struct morse_hw_regs mm8108_regs;
 
 /**
  * morse_hw_reset - performs a hardware reset on the chip by toggling

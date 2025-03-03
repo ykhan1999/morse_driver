@@ -123,6 +123,14 @@ struct uaccess *morse_spi_uaccess;
 
 #define MM610X_BUF_SIZE			(8 * 1024U)
 
+/* Booting the chip with an external (slower) clock requires the transfer of extra bytes (0xFF)
+ * during write operations. This will clock the SDIO/SPI hardware for a longer duration,
+ * giving the chip more time to process and respond to CMDs.
+ *
+ * Derived using a 50MHz bus speed, and 32KHz external crystal oscillator.
+ */
+#define XTAL_TRANSFER_DELAY_BYTES	(2 * 1024U)
+
 /* SW-5611:
  *
  * The value of SPI_MAX_TRANSACTION_SIZE was increased from 4096 to 8192
@@ -160,6 +168,7 @@ MODULE_PARM_DESC(spi_use_edge_irq, "Enable compatibility for edge IRQs on SPI");
 
 static const struct spi_device_id morse_device_ids[] = {
 	{ MORSE_SPI_DEVICE("mm610x-spi", mm61xx_chip_series) },
+	{ MORSE_SPI_DEVICE("mm810x-spi", mm81xx_chip_series) },
 	{ }
 };
 
@@ -167,6 +176,7 @@ MODULE_DEVICE_TABLE(spi, morse_device_ids);
 
 static const struct of_device_id morse_spi_of_match[] = {
 	{.compatible = "morse,mm610x-spi", (const void *)&mm61xx_chip_series },
+	{.compatible = "morse,mm810x-spi", (const void *)&mm81xx_chip_series },
 	{ }
 };
 
@@ -276,7 +286,9 @@ static void morse_spi_xfer_init(struct morse_spi *mspi)
 	/* setup message from a single data buffer */
 	spi_message_init(&mspi->m);
 
+#if KERNEL_VERSION(6, 10, 0) > LINUX_VERSION_CODE
 	mspi->m.is_dma_mapped = false;
+#endif
 	mspi->t.tx_buf = mspi->data;
 	mspi->t.rx_buf = mspi->data;
 	mspi->t.cs_change = 0;
@@ -334,6 +346,7 @@ static int morse_spi_cmd(struct morse_spi *mspi, u8 cmd, u32 arg)
 {
 	int ret;
 	u8 *cp = mspi->data;
+	unsigned int buffer_size = SPI_COMMAND_BUF_SIZE;
 
 	/*
 	 * We can handle most commands (except block reads) in one full
@@ -349,15 +362,21 @@ static int morse_spi_cmd(struct morse_spi *mspi, u8 cmd, u32 arg)
 	 * We init the whole buffer to all-ones, which is what we need
 	 * to write while we're reading (later) response data.
 	 */
+	if (enable_ext_xtal_init) {
+		struct morse *mors = spi_get_drvdata(mspi->spi);
 
-	memset(cp, 0xff, SPI_COMMAND_BUF_SIZE);
+		if (mors->cfg->xtal_init_bus_trans_delay_ms)
+			buffer_size += XTAL_TRANSFER_DELAY_BYTES;
+	}
+
+	memset(cp, 0xff, buffer_size);
 	cp[1] = 0x40 | cmd;
 
 	put_unaligned_be32(arg, cp + 2);
 
 	cp[6] = crc7_be(0, cp + 1, 5) | 0x01;
 
-	ret = morse_spi_xfer(mspi, SPI_COMMAND_BUF_SIZE);
+	ret = morse_spi_xfer(mspi, buffer_size);
 
 	if (ret)
 		return ret;
@@ -370,7 +389,7 @@ static int morse_spi_cmd(struct morse_spi *mspi, u8 cmd, u32 arg)
 	 * two data bits, but otherwise it's all ones.
 	 */
 	return morse_spi_find_response(mspi, mspi->data + SPI_RESP_OFFSET,
-				       mspi->data + SPI_COMMAND_BUF_SIZE, NULL);
+				       mspi->data + buffer_size, NULL);
 }
 
 static int morse_spi_cmd52(struct morse_spi *mspi, u8 fn, u8 data, u32 address)
@@ -667,6 +686,13 @@ static int morse_spi_cmd53_write(struct morse_spi *mspi, u8 fn, u32 address, u8 
 		cp += block ? mspi->inter_block_delay_bytes : 4;
 	}
 
+	if (enable_ext_xtal_init) {
+		struct morse *mors = spi_get_drvdata(mspi->spi);
+
+		if (mors->cfg->xtal_init_bus_trans_delay_ms)
+			cp += XTAL_TRANSFER_DELAY_BYTES;
+	}
+
 	/* Do the actual transfer */
 	end = cp;
 
@@ -697,6 +723,19 @@ exit:
 	return -EPROTO;
 }
 
+static void spi_log_err(struct morse_spi *mspi, const char *operation, unsigned int fn,
+			unsigned int address, unsigned int len, int ret)
+{
+	struct morse *mors = spi_get_drvdata(mspi->spi);
+
+	if (!mors)
+		return;
+
+	MORSE_SPI_ERR(mors, "spi: %s fn=%d 0x%08x:%d r=0x%08x b=0x%08x (ret:%d)",
+		      operation, fn, address, len, mspi->register_addr_base,
+		      mspi->bulk_addr_base, ret);
+}
+
 static u32 morse_spi_calculate_base_address(u32 address, u8 access)
 {
 	return (address & MORSE_SDIO_RW_ADDR_BOUNDARY_MASK) | (access & 0x3);
@@ -707,6 +746,7 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 {
 	int ret = 0;
 	u8 base[4];
+	const char *operation = "set_address_base";
 	u32 calculated_addr_base = morse_spi_calculate_base_address(address, access);
 	u32 *current_addr_base = bulk ? &mspi->bulk_addr_base : &mspi->register_addr_base;
 	bool base_addr_is_unset = (*current_addr_base == MORSE_SPI_BASE_ADDR_UNSET);
@@ -721,26 +761,38 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 	base[1] = (u8)((address & 0xFF000000) >> 24);
 	base[2] = access & 0x3;	/* 1, 2 or 4 byte access */
 
+	MORSE_SPI_DBG(mors, "%s: fn[%d] addr:0x%08x access:%s", __func__, func_to_use, address,
+		      (access == MORSE_CONFIG_ACCESS_1BYTE) ? "1b" : "4b");
+
 	/* Write them as single bytes for now */
 	if (base_addr_is_unset ||
 	    (base[0] != (u8)(((*current_addr_base) & 0x00FF0000) >> 16))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[0], MORSE_REG_ADDRESS_WINDOW_0);
-		if (ret)
+		if (ret) {
+			spi_log_err(mspi, operation, func_to_use, MORSE_REG_ADDRESS_WINDOW_0, 1,
+				    ret);
 			goto err;
+		}
 	}
 
 	if (base_addr_is_unset ||
 	    (base[1] != (u8)(((*current_addr_base) & 0xFF000000) >> 24))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[1], MORSE_REG_ADDRESS_WINDOW_1);
-		if (ret)
+		if (ret) {
+			spi_log_err(mspi, operation, func_to_use, MORSE_REG_ADDRESS_WINDOW_1, 1,
+				    ret);
 			goto err;
+		}
 	}
 
 	if (base_addr_is_unset ||
 	    (base[2] != (u8)(((*current_addr_base) & 0x3)))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[2], MORSE_REG_ADDRESS_CONFIG);
-		if (ret)
+		if (ret) {
+			spi_log_err(mspi, operation, func_to_use, MORSE_REG_ADDRESS_CONFIG, 1,
+				    ret);
 			goto err;
+		}
 	}
 
 	*current_addr_base = calculated_addr_base;
@@ -748,8 +800,6 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 
 err:
 	*current_addr_base = MORSE_SPI_BASE_ADDR_UNSET;
-	MORSE_SPI_ERR(mors, "%s failed (errno=%d)\n", __func__, ret);
-
 	return ret;
 }
 
@@ -757,8 +807,6 @@ static int morse_spi_get_func(struct morse_spi *mspi, u32 address, ssize_t size,
 {
 	int ret = 0;
 	int func_to_use;
-	struct spi_device *spi = mspi->spi;
-	struct morse *mors = spi_get_drvdata(spi);
 	u32 calculated_base_address = morse_spi_calculate_base_address(address, access);
 
 	if (size > sizeof(u32)) {
@@ -772,9 +820,6 @@ static int morse_spi_get_func(struct morse_spi *mspi, u32 address, ssize_t size,
 		MORSE_WARN_ON(FEATURE_ID_SPI, mspi->register_addr_base == 0);
 		func_to_use = SPI_SDIO_FUNC_1;
 	}
-
-	if (ret)
-		MORSE_SPI_ERR(mors, "%s failed\n", __func__);
 
 	return (!ret) ? func_to_use : ret;
 }
@@ -809,24 +854,31 @@ static int morse_spi_mem_read(struct morse_spi *mspi, u32 address, u8 *data, u32
 		/* we only have 4K per SPI transaction */
 		while (blks - blks_done) {
 			int blk_count = min_t(int, mspi->max_block_count, blks - blks_done);
+			u32 next_addr = address + blks_done * MMC_SPI_BLOCKSIZE;
 
 			ret = morse_spi_cmd53_read(mspi, func_to_use,
-						   address + blks_done * MMC_SPI_BLOCKSIZE,
+						   next_addr,
 						   data + blks_done * MMC_SPI_BLOCKSIZE,
 						   blk_count, 1);
-			if (ret < 0)
+			if (ret < 0) {
+				spi_log_err(mspi, "cmd53_read", func_to_use, next_addr, blk_count,
+					    ret);
 				goto exit;
+			}
 
 			blks_done += blk_count;
 		}
 	}
 
 	if (bytes) {
-		ret =
-		    morse_spi_cmd53_read(mspi, func_to_use, address + blks_done * MMC_SPI_BLOCKSIZE,
-					 data + blks_done * MMC_SPI_BLOCKSIZE, bytes, 0);
-		if (ret < 0)
+		u32 next_addr = address + blks_done * MMC_SPI_BLOCKSIZE;
+
+		ret = morse_spi_cmd53_read(mspi, func_to_use, next_addr,
+					   data + blks_done * MMC_SPI_BLOCKSIZE, bytes, 0);
+		if (ret < 0) {
+			spi_log_err(mspi, "cmd53_read", func_to_use, next_addr, bytes, ret);
 			goto exit;
+		}
 	}
 
 	/* Observed sometimes that SPI read repeats the first 4-bytes word twice,
@@ -849,15 +901,12 @@ static int morse_spi_mem_read(struct morse_spi *mspi, u32 address, u8 *data, u32
 
 exit:
 	mutex_unlock(&mspi->lock);
-	MORSE_SPI_ERR(mors, "%s failed (errno=%d)\n", __func__, ret);
 	return ret;
 }
 
 static int morse_spi_mem_write(struct morse_spi *mspi, u32 address, u8 *data, u32 size)
 {
 	int ret = 0;
-	struct spi_device *spi = mspi->spi;
-	struct morse *mors = spi_get_drvdata(spi);
 	u32 bytes = size & (MMC_SPI_BLOCKSIZE - 1);
 	u32 blks = (size - bytes) / MMC_SPI_BLOCKSIZE;
 	u32 blks_done = 0;
@@ -877,25 +926,31 @@ static int morse_spi_mem_write(struct morse_spi *mspi, u32 address, u8 *data, u3
 		/* we only have 4K per SPI transaction */
 		while (blks - blks_done) {
 			int blk_count = min_t(int, mspi->max_block_count, blks - blks_done);
+			u32 next_addr = address + blks_done * MMC_SPI_BLOCKSIZE;
 
 			ret = morse_spi_cmd53_write(mspi, func_to_use,
-						    address + blks_done * MMC_SPI_BLOCKSIZE,
+						    next_addr,
 						    data + blks_done * MMC_SPI_BLOCKSIZE,
 						    blk_count, 1);
-			if (ret < 0)
+			if (ret < 0) {
+				spi_log_err(mspi, "cmd53_write", func_to_use, next_addr, blk_count,
+					    ret);
 				goto exit;
+			}
 
 			blks_done += blk_count;
 		}
 	}
 
 	if (bytes) {
-		ret =
-		    morse_spi_cmd53_write(mspi, func_to_use,
-					  address + blks_done * MMC_SPI_BLOCKSIZE,
-					  data + blks_done * MMC_SPI_BLOCKSIZE, bytes, 0);
-		if (ret < 0)
+		u32 next_addr = address + blks_done * MMC_SPI_BLOCKSIZE;
+
+		ret = morse_spi_cmd53_write(mspi, func_to_use, next_addr,
+					    data + blks_done * MMC_SPI_BLOCKSIZE, bytes, 0);
+		if (ret < 0) {
+			spi_log_err(mspi, "cmd53_write", func_to_use, next_addr, bytes, ret);
 			goto exit;
+		}
 	}
 
 	mutex_unlock(&mspi->lock);
@@ -903,7 +958,6 @@ static int morse_spi_mem_write(struct morse_spi *mspi, u32 address, u8 *data, u3
 
 exit:
 	mutex_unlock(&mspi->lock);
-	MORSE_SPI_ERR(mors, "%s failed (errno=%d)\n", __func__, ret);
 	return ret;
 }
 
@@ -1062,7 +1116,9 @@ static irqreturn_t morse_spi_irq_handler(int irq, struct morse_spi *mspi)
 	 * either the chip has cleared all its IRQ bits, or the pin goes high again.
 	 */
 	do {
+		morse_claim_bus(mors);
 		ret = morse_hw_irq_handle(mors);
+		morse_release_bus(mors);
 	} while (spi_use_edge_irq && ret && !gpio_get_value(mors->cfg->mm_spi_irq_gpio));
 
 	return IRQ_HANDLED;
@@ -1129,7 +1185,7 @@ static void morse_spi_remove_irq(struct morse_spi *mspi)
 	gpio_free(mors->cfg->mm_spi_irq_gpio);
 }
 
-void morse_spi_set_irq(struct morse *mors, bool enable)
+static void morse_spi_set_irq(struct morse *mors, bool enable)
 {
 	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
 
@@ -1164,6 +1220,8 @@ static void morse_spi_remove(struct spi_device *spi)
 			destroy_workqueue(mors->chip_wq);
 			flush_workqueue(mors->net_wq);
 			destroy_workqueue(mors->net_wq);
+		} else {
+			morse_spi_disable_irq(mspi);
 		}
 
 		morse_spi_remove_irq(mspi);
@@ -1183,7 +1241,7 @@ static void morse_spi_remove(struct spi_device *spi)
 #endif
 }
 
-void morse_spi_claim_bus(struct morse *mors)
+static void morse_spi_claim_bus(struct morse *mors)
 {
 	struct morse_spi *mspi;
 
@@ -1191,7 +1249,7 @@ void morse_spi_claim_bus(struct morse *mors)
 	mutex_lock(&mspi->bus_lock);
 }
 
-void morse_spi_release_bus(struct morse *mors)
+static void morse_spi_release_bus(struct morse *mors)
 {
 	struct morse_spi *mspi;
 
@@ -1226,6 +1284,29 @@ static void morse_spi_bus_enable(struct morse *mors, bool enable)
 	}
 }
 
+static void morse_spi_config_burst_mode(struct morse *mors, bool enable_burst)
+{
+	s32 inter_block_delay_nano_s;
+	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
+	u8 burst_mode = (enable_burst) ? SDIO_WORD_BURST_SIZE_16 : SDIO_WORD_BURST_DISABLE;
+
+	if (!mors->cfg->enable_sdio_burst_mode)
+		return;
+
+	inter_block_delay_nano_s = mors->cfg->enable_sdio_burst_mode(mors, burst_mode);
+	if (inter_block_delay_nano_s > 0) {
+		/* No Errors detected, therefore, the value returned can be used to
+		 * set the inter block delay.
+		 */
+		mspi->inter_block_delay_bytes =
+			inter_block_delay_nano_s /
+				(SPI_CLK_PERIOD_NANO_S(spi_clock_speed) * 8);
+		mspi->max_block_count =
+			SPI_MAX_TRANSACTION_SIZE / (MMC_SPI_BLOCKSIZE +
+						mspi->inter_block_delay_bytes);
+	}
+}
+
 static const struct morse_bus_ops morse_spi_ops = {
 	.dm_read = morse_spi_dm_read,
 	.dm_write = morse_spi_dm_write,
@@ -1236,6 +1317,7 @@ static const struct morse_bus_ops morse_spi_ops = {
 	.release = morse_spi_release_bus,
 	.reset = morse_spi_bus_reset,
 	.set_irq = morse_spi_set_irq,
+	.config_burst_mode = morse_spi_config_burst_mode,
 	.bulk_alignment = MORSE_DEFAULT_BULK_ALIGNMENT
 };
 
@@ -1246,7 +1328,6 @@ static int morse_spi_probe(struct spi_device *spi)
 	struct morse_spi *mspi;
 	const struct of_device_id *match;
 	struct morse_chip_series *mors_chip_series;
-	s32 inter_block_delay_nano_s;
 
 	match = of_match_device(of_match_ptr(morse_spi_of_match), &spi->dev);
 	if (match)
@@ -1293,7 +1374,36 @@ static int morse_spi_probe(struct spi_device *spi)
 	mutex_init(&mspi->bus_lock);
 	spi_set_drvdata(spi, mors);
 
+	if (enable_ext_xtal_init) {
+		/* Under usual init the morse chip series for a SPI device is derived
+		 * by reading the chip id address as part of `morse_chip_cfg_detect_and_init()`.
+		 *
+		 * When the chip requires external XTAL init, reading registers will not be
+		 * possible until the XTAL init process has completed. Due to this, assume the
+		 * device is a MM610x chip series to enable external XTAL booting.
+		 *
+		 * External XTAL delays must be enabled prior to attempting SDIO to SPI
+		 * (CMD63) init sequence.
+		 */
+		morse_chip_cfg_init(mors, MM6108A2_ID);
+		if (mors->cfg->enable_ext_xtal_delay)
+			mors->cfg->enable_ext_xtal_delay(mors, true);
+	}
+
 	/* spi init */
+#if KERNEL_VERSION(6, 1, 21) <= LINUX_VERSION_CODE
+	/* Enable flag SPI_CONTROLLER_ENABLE_CS_GPIOD for GPIO descriptor interface support in
+	 * handling chip select (in SPI bus driver). Required starting from 6.1 kernel.
+	 * This flag enables following changes in SPI bus driver:
+	 * 1. Do not set SPI_CS_HIGH by default during setup.
+	 * 2. Invert GPIO polarity in the spi_set_cs function when SPI mode is set to SPI_CS_HIGH.
+	 */
+#ifdef SPI_CONTROLLER_ENABLE_CS_GPIOD
+	spi->controller->flags |= SPI_CONTROLLER_ENABLE_CS_GPIOD;
+#else
+#warning "SPI_CONTROLLER_ENABLE_CS_GPIOD macro not defined"
+#endif
+#endif
 	morse_spi_xfer_init(mspi);
 	if (!is_rk3288)
 		morse_spi_initsequence(mspi);
@@ -1308,13 +1418,19 @@ static int morse_spi_probe(struct spi_device *spi)
 		ret = morse_spi_cmd(mspi, SD_IO_MORSE_INIT, 0x00000000);
 		if (!ret)
 			break;
-		MORSE_DBG(mors, "%s: SD_IO_RESET\n", __func__);
+		MORSE_SPI_DBG(mors, "%s: SD_IO_RESET\n", __func__);
 		morse_spi_cmd(mspi, SD_IO_RESET, 0x00000000);
 	}
 
 	if (ret) {
-		MORSE_SPI_ERR(mors, "failed initialise SPI: %d\n", ret);
+		MORSE_SPI_ERR(mors, "%s: failed to init SPI with CMD63 (ret:%d)\n", __func__, ret);
 		goto err_cfg;
+	}
+
+	/* Digital reset the chip now if external (host) xtal initialisation is required */
+	if (enable_ext_xtal_init) {
+		MORSE_SPI_DBG(mors, "Resetting chip early for external xtal init");
+		mors->cfg->digital_reset(mors);
 	}
 
 	ret = morse_chip_cfg_detect_and_init(mors, mors_chip_series);
@@ -1346,33 +1462,8 @@ static int morse_spi_probe(struct spi_device *spi)
 	}
 	mors->board_serial = serial;
 
-	/*
-	 * Now that a valid chip id has been found, let's enable burst mode.
-	 * The function below will check if burst mode is supported and if so, enable it.
-	 * A NULL check is also performed to make sure the chips that don't have this will
-	 * work with the default inter block delay.
-	 */
-	if (mors->cfg->enable_sdio_burst_mode) {
-		inter_block_delay_nano_s = mors->cfg->enable_sdio_burst_mode(mors);
-
-		if (inter_block_delay_nano_s > 0) {
-			/* No Errors detected, therefore, the value returned can be used to
-			 * set the inter block delay.
-			 */
-			mspi->inter_block_delay_bytes =
-				inter_block_delay_nano_s /
-				(SPI_CLK_PERIOD_NANO_S(spi_clock_speed) * 8);
-			mspi->max_block_count =
-				SPI_MAX_TRANSACTION_SIZE / (MMC_SPI_BLOCKSIZE +
-							mspi->inter_block_delay_bytes);
-		}
-	}
-
 	MORSE_SPI_INFO(mors, "Morse Micro SPI device found, chip ID=0x%04x\n", mors->chip_id);
 	MORSE_SPI_INFO(mors, "Board serial: %s\n", mors->board_serial);
-	MORSE_SPI_INFO(mors, "clock=%d MHz, delay bytes=%d, max block count=%d\n",
-		       spi_clock_speed / 1000000, mspi->inter_block_delay_bytes,
-		       mspi->max_block_count);
 
 	/* OTP BXW check is done only for MM610x */
 	if (enable_otp_check && !is_otp_xtal_wait_supported(mors)) {
@@ -1404,6 +1495,18 @@ static int morse_spi_probe(struct spi_device *spi)
 	ret = morse_firmware_init(mors, test_mode);
 	if (ret)
 		goto err_fw;
+
+	/*
+	 * Now that a valid chip id has been found, let's enable burst mode.
+	 * The function below will check if burst mode is supported and if so, enable it.
+	 * A NULL check is also performed to make sure the chips that don't have this will
+	 * work with the default inter block delay.
+	 */
+	morse_spi_config_burst_mode(mors, true);
+
+	MORSE_SPI_INFO(mors, "clock=%d MHz, delay bytes=%d, max block count=%d\n",
+		       spi_clock_speed / 1000000, mspi->inter_block_delay_bytes,
+		       mspi->max_block_count);
 
 	if (morse_test_mode_is_interactive(test_mode)) {
 		mors->chip_wq = create_singlethread_workqueue("MorseChipIfWorkQ");

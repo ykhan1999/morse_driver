@@ -54,7 +54,7 @@
 /** Delay after initiating digital reset for external xtal init */
 #define MM6108_XTAL_INIT_DIG_RESET_DELAY_MS 50
 /** Extra delay to wait on sdio transactions until the xtal has been initialised */
-#define MM6108_XTAL_INIT_SDIO_TRANS_DELAY_MS 2
+#define MM6108_XTAL_INIT_BUS_TRANS_DELAY_MS 2
 
 #define MM6108_DMEM_ADDR_START		0x80100000
 
@@ -83,11 +83,11 @@ static const char *mm610x_get_hw_version(u32 chip_id)
 {
 	switch (chip_id) {
 	case MM6108A0_ID:
-		return "MM6108-A0";
+		return "MM6108A0";
 	case MM6108A1_ID:
-		return "MM6108-A1";
+		return "MM6108A1";
 	case MM6108A2_ID:
-		return "MM6108-A2";
+		return "MM6108A2";
 	}
 	return "unknown";
 }
@@ -113,9 +113,17 @@ static u8 mm610x_get_wakeup_delay_ms(u32 chip_id)
 		return 20;
 }
 
-static int mm610x_enable_burst_mode(struct morse *mors)
+static int mm610x_enable_burst_mode(struct morse *mors, const u8 burst_mode)
 {
+	(void)burst_mode;
 	return MM6108_SPI_INTER_BLOCK_DELAY_NANO_S;
+}
+
+static void mm610x_enable_ext_xtal_delay(struct morse *mors, bool enable)
+{
+	/* Set XTAL init bus transaction delay on each digital reset */
+	mors->cfg->xtal_init_bus_trans_delay_ms = (enable) ?
+		MM6108_XTAL_INIT_BUS_TRANS_DELAY_MS : 0;
 }
 
 static int mm610x_ext_xtal_init(struct morse *mors)
@@ -123,28 +131,28 @@ static int mm610x_ext_xtal_init(struct morse *mors)
 	/* switch aon-clk to 32KHz and latch it */
 	morse_reg32_write(mors, MM6108_REG_AON_LATCH_ADDR,
 			MM6108_REG_XTAL_INIT_SEQ_AON_CLK_VAL);
-	msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
+	msleep(mors->cfg->xtal_init_bus_trans_delay_ms);
 
 	/* enable gpio 1 which will enable the xtal */
 	morse_reg32_write(mors, MM6108_REG_XTAL_INIT_SEQ_ADDR_1,
 			MM6108_REG_XTAL_INIT_SEQ_ADDR_1_VAL);
-	msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
+	msleep(mors->cfg->xtal_init_bus_trans_delay_ms);
 	morse_reg32_write(mors, MM6108_REG_XTAL_INIT_SEQ_ADDR_2,
 			MM6108_REG_XTAL_INIT_SEQ_ADDR_2_VAL);
-	msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
+	msleep(mors->cfg->xtal_init_bus_trans_delay_ms);
 
 	/* enable digital pll */
 	morse_reg32_write(mors, MM6108_REG_XTAL_INIT_SEQ_ADDR_3,
 			MM6108_REG_XTAL_INIT_SEQ_ADDR_3_VAL);
-	msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
+	msleep(mors->cfg->xtal_init_bus_trans_delay_ms);
 
 	/* switch clocks */
 	morse_reg32_write(mors, MM6108_REG_XTAL_INIT_SEQ_ADDR_4,
 			MM6108_REG_XTAL_INIT_SEQ_ADDR_4_VAL);
-	msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
+	msleep(mors->cfg->xtal_init_bus_trans_delay_ms);
 
-	/* It's now initialised no need to wait further in sdio logic */
-	mors->cfg->xtal_init_sdio_trans_delay_ms = 0;
+	/* It's now initialised no need to wait further in bus logic */
+	mm610x_enable_ext_xtal_delay(mors, false);
 	return 0;
 }
 
@@ -152,9 +160,8 @@ static int mm610x_digital_reset(struct morse *mors)
 {
 	morse_claim_bus(mors);
 
-	/* Set XTAL init sdio transaction delay on each digital reset */
-	mors->cfg->xtal_init_sdio_trans_delay_ms = (enable_ext_xtal_init) ?
-		MM6108_XTAL_INIT_SDIO_TRANS_DELAY_MS : 0;
+	if (enable_ext_xtal_init)
+		mm610x_enable_ext_xtal_delay(mors, true);
 
 	if (MORSE_REG_RESET(mors) != 0)
 		morse_reg32_write(mors, MORSE_REG_RESET(mors), MORSE_REG_RESET_VALUE(mors));
@@ -306,9 +313,11 @@ struct morse_hw_cfg mm6108_cfg = {
 	.get_fw_path = mm610x_get_fw_path,
 	.digital_reset = mm610x_digital_reset,
 	.pre_coredump_hook = mm610x_pre_coredump_hook,
+	.post_coredump_hook = NULL,
 	.board_type_max_value = MM610X_BOARD_TYPE_MAX_VALUE,
 	.bus_double_read = true,
 	.enable_short_bcn_as_dtim = false,
+	.enable_ext_xtal_delay = mm610x_enable_ext_xtal_delay,
 	.valid_chip_ids = {
 			   MM6108A0_ID,
 			   MM6108A1_ID,

@@ -7,6 +7,7 @@
 #include <net/mac80211.h>
 #include <net/netlink.h>
 
+#include "command.h"
 #include "mac.h"
 #include "bus.h"
 #include "debug.h"
@@ -32,7 +33,7 @@ morse_vendor_cmd_to_morse(struct wiphy *wiphy, struct wireless_dev *wdev,
 	int dataout_len;
 	struct morse_cmd_vendor *datain;
 	struct morse_resp_vendor *dataout;
-	struct ieee80211_vif *vif = wdev_to_ieee80211_vif(wdev);
+	struct ieee80211_vif *vif = NULL;
 	struct morse_vif *mors_vif;
 
 	if (!data || data_len < sizeof(struct morse_cmd))
@@ -43,11 +44,14 @@ morse_vendor_cmd_to_morse(struct wiphy *wiphy, struct wireless_dev *wdev,
 		return -ENOMEM;
 	memcpy(datain, data, data_len);
 
-	if (vif) {
-		mors_vif = ieee80211_vif_to_morse_vif(vif);
-		/* Add the VIF ID to the command header */
-		if (mors_vif)
-			datain->hdr.vif_id = cpu_to_le16(mors_vif->id);
+	if (wdev) {
+		vif = wdev_to_ieee80211_vif(wdev);
+		if (vif) {
+			mors_vif = ieee80211_vif_to_morse_vif(vif);
+			/* Add the VIF ID to the command header */
+			if (mors_vif)
+				datain->hdr.vif_id = cpu_to_le16(mors_vif->id);
+		}
 	}
 
 	skb = cfg80211_vendor_cmd_alloc_reply_skb(wiphy, sizeof(*dataout));
@@ -60,7 +64,10 @@ morse_vendor_cmd_to_morse(struct wiphy *wiphy, struct wireless_dev *wdev,
 	dataout = (struct morse_resp_vendor *)skb_put(skb, sizeof(*dataout));
 
 	mutex_lock(&mors->lock);
-	morse_cmd_vendor(mors, vif, datain, data_len, dataout, &dataout_len);
+	if (wdev)
+		morse_cmd_vendor(mors, vif, datain, data_len, dataout, &dataout_len);
+	else
+		morse_wiphy_cmd_vendor(mors, datain, data_len, dataout, &dataout_len);
 	mutex_unlock(&mors->lock);
 	skb_len += dataout_len;
 	kfree(datain);
@@ -80,6 +87,17 @@ static const struct wiphy_vendor_command morse_vendor_commands[] = {
 #endif
 	 .doit = morse_vendor_cmd_to_morse,
 	  },
+	{
+	 .info = {
+		  .vendor_id = MORSE_OUI,
+		  .subcmd = MORSE_VENDOR_WIPHY_CMD_TO_MORSE,
+		  },
+	 .flags = 0,
+#if KERNEL_VERSION(5, 3, 0) <= MAC80211_VERSION_CODE
+	 .policy = VENDOR_CMD_RAW_DATA,
+#endif
+	 .doit = morse_vendor_cmd_to_morse,
+	},
 };
 
 static const struct nl80211_vendor_cmd_info morse_vendor_events[] = {
@@ -367,7 +385,7 @@ int morse_vendor_get_ie_len_for_pkt(struct sk_buff *pkt, int oui_type)
 	return sizeof(struct dot11_morse_vendor_caps_ops_ie) + 2;
 }
 
-int morse_vendor_send_bcn_vendor_ie_found_event(struct ieee80211_vif *vif,
+static int morse_vendor_send_bcn_vendor_ie_found_event(struct ieee80211_vif *vif,
 						const struct ieee80211_vendor_ie *vie)
 {
 	struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);

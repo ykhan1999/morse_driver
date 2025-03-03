@@ -33,6 +33,9 @@
 #define PAGE_RETURN_NOTIFY_INT	4
 #endif
 
+/* Time in milliseconds to wait for the beacon tasklet to queue the beacon to skbq */
+#define BEACON_TASKLET_WAITQ_TIMEOUT 1
+
 static int is_pageset_locked(struct morse_pageset *pageset)
 {
 	return test_bit(0, &pageset->access_lock);
@@ -45,7 +48,7 @@ static int pageset_lock(struct morse_pageset *pageset)
 	return 0;
 }
 
-void pageset_unlock(struct morse_pageset *pageset)
+static void pageset_unlock(struct morse_pageset *pageset)
 {
 	clear_bit_unlock(0, &pageset->access_lock);
 }
@@ -334,7 +337,7 @@ static bool morse_pageset_rsved_page_is_avail(struct morse_pageset *pageset, u8 
 	return 0;
 }
 
-int morse_pageset_write(struct morse_pageset *pageset, struct sk_buff *skb)
+static int morse_pageset_write(struct morse_pageset *pageset, struct sk_buff *skb)
 {
 	int ret = 0;
 	bool from_rsvd = false;
@@ -406,7 +409,7 @@ exit:
 	return ret;
 }
 
-int morse_pageset_read(struct morse_pageset *pageset)
+static int morse_pageset_read(struct morse_pageset *pageset)
 {
 	int ret = 0;
 	struct morse *mors = pageset->mors;
@@ -773,12 +776,33 @@ static bool morse_pageset_tx_mgmt_handler(struct morse_pageset *pageset)
 	return (morse_skbq_count(mgmt_q) > 0);
 }
 
+/**
+ * morse_is_beacon_request_interrupt_set() -  Checks if beacon request interrupt
+ * bit is set.
+ *
+ * @mors: morse chip struct
+ *
+ * Return: true if beacon request interrupt bit is set.
+ */
+static inline bool morse_is_beacon_request_interrupt_set(struct morse *mors)
+{
+	u32 status1 = 0;
+
+	morse_reg32_read(mors, MORSE_REG_INT1_STS(mors), &status1);
+	if (status1 & MORSE_INT_BEACON_VIF_MASK_ALL)
+		return true;
+
+	return false;
+}
+
 /* Returns true if there are populated RX pages left in the device */
-static bool morse_pageset_rx_handler(struct morse_pageset *pageset)
+static bool morse_pageset_rx_handler(struct morse_pageset *pageset,
+	bool *is_beacon_pending)
 {
 	int ret = 0;
 	int count = 0;
 	bool return_notify_req = false;
+	bool do_beacon_irq_check = is_beacon_pending;
 
 	MORSE_WARN_ON(FEATURE_ID_PAGER, is_pageset_locked(pageset));
 
@@ -790,6 +814,12 @@ static bool morse_pageset_rx_handler(struct morse_pageset *pageset)
 		if ((count % PAGE_RETURN_NOTIFY_INT) == 0) {
 			pageset->return_pager->ops->notify(pageset->return_pager);
 			return_notify_req = false;
+
+			if (do_beacon_irq_check &&
+			    (morse_is_beacon_request_interrupt_set(pageset->mors))) {
+				*is_beacon_pending = true;
+				break;
+			}
 		}
 	} while ((count < MAX_PAGES_PER_RX_TXN) && (ret == 0));
 
@@ -800,7 +830,8 @@ static bool morse_pageset_rx_handler(struct morse_pageset *pageset)
 
 	pageset->populated_pager->ops->notify(pageset->populated_pager);
 
-	if (ret == -ENOMEM || count == MAX_PAGES_PER_RX_TXN)
+	if (ret == -ENOMEM || count == MAX_PAGES_PER_RX_TXN ||
+	    (do_beacon_irq_check && *is_beacon_pending))
 		return true;
 	else
 		return false;
@@ -842,6 +873,7 @@ void morse_pagesets_work(struct work_struct *work)
 	unsigned long flags_on_entry = mors->chip_if->event_flags;
 	unsigned long *flags = &mors->chip_if->event_flags;
 	int rx_buffered_on_entry = morse_pageset_get_rx_buffered_count(mors);
+	bool is_beacon_pending = false;
 
 	if (!flags_on_entry)
 		return;
@@ -854,12 +886,10 @@ void morse_pagesets_work(struct work_struct *work)
 	morse_ps_disable(mors);
 	morse_claim_bus(mors);
 
-	/* Tx time critical beacons first */
-	if (test_and_clear_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags)) {
+	/* Tx beacons first */
+	if (test_and_clear_bit(MORSE_TX_BEACON_PEND, flags)) {
 		if (morse_pageset_tx_beacon_handler(mors->chip_if->to_chip_pageset))
-			set_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags);
-		else
-			clear_bit(MORSE_TX_BEACON_PEND, flags);
+			set_bit(MORSE_TX_BEACON_PEND, flags);
 	}
 
 	/* Handle any populated RX pages from chip first to
@@ -867,8 +897,19 @@ void morse_pagesets_work(struct work_struct *work)
 	 * Check if all pages were removed, set event flags if not.
 	 */
 	if (test_and_clear_bit(MORSE_RX_PEND, flags)) {
-		if (morse_pageset_rx_handler(mors->chip_if->from_chip_pageset))
+		/* Check for beacon requests from target if AP interface exists */
+		if (morse_pageset_rx_handler(mors->chip_if->from_chip_pageset,
+				mors->num_of_ap_interfaces > 0 ? &is_beacon_pending : NULL))
 			set_bit(MORSE_RX_PEND, flags);
+
+		if (is_beacon_pending) {
+			mors->beacon_queued = false;
+			morse_release_bus(mors);
+			wait_event_interruptible_timeout(mors->beacon_tasklet_waitq,
+				mors->beacon_queued,
+				msecs_to_jiffies(BEACON_TASKLET_WAITQ_TIMEOUT));
+			morse_claim_bus(mors);
+		}
 	}
 
 	/* Handle any free TX pages being returned so caches are refilled */
@@ -881,15 +922,16 @@ void morse_pagesets_work(struct work_struct *work)
 			set_bit(MORSE_TX_COMMAND_PEND, flags);
 	}
 
-	/* TX beacons before considering mgmt/data. Also check for time critical beacon,
-	 * if it is not sent already due to unavailability of pages
-	 */
-	if (test_and_clear_bit(MORSE_TX_BEACON_PEND, flags) ||
-		test_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags)) {
+	/* TX beacons before considering mgmt/data */
+	if (test_and_clear_bit(MORSE_TX_BEACON_PEND, flags)) {
 		if (morse_pageset_tx_beacon_handler(mors->chip_if->to_chip_pageset))
 			set_bit(MORSE_TX_BEACON_PEND, flags);
-		else
-			clear_bit(MORSE_TX_TIME_CRITICAL_BEACON_PEND, flags);
+	}
+
+	/* Process Rx buffers again if rx pages processing is stopped for any pending beacon */
+	if (test_and_clear_bit(MORSE_RX_PEND, flags) && is_beacon_pending) {
+		if (morse_pageset_rx_handler(mors->chip_if->from_chip_pageset, NULL))
+			set_bit(MORSE_RX_PEND, flags);
 	}
 
 	/* TX mgmt before considering data */
@@ -1004,6 +1046,9 @@ int morse_pageset_init(struct morse *mors, struct morse_pageset *pageset,
 	populated_pager->parent = pageset;
 	return_pager->parent = pageset;
 
+	pageset_trace_init(pageset);
+	pageset_trace_log(populated_pager, PAGESET_TRACE_EVENT_ID_INIT, 0);
+	pageset_trace_log(return_pager, PAGESET_TRACE_EVENT_ID_INIT, 0);
 	return 0;
 }
 

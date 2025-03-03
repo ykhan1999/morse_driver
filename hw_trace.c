@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/gpio.h>
 #include "hw_trace.h"
+#include "debug.h"
 
 struct hw_trace morse_traces[] = {
 	{ 2, 0 },		/* GPIO 2 */

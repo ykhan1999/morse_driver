@@ -10,7 +10,8 @@
 #include "pageset.h"
 #include "pager_if_hw.h"
 #include "pager_if_sw.h"
-
+#include "yaps.h"
+#include "yaps-hw.h"
 
 /** Chip IF interrupt mask. We may use any interrupts in this range */
 #define MORSE_CHIP_IF_IRQ_MASK_ALL	(GENMASK(13, 0) | \
@@ -27,6 +28,7 @@ enum morse_chip_if_flags {
 
 enum morse_chip_if {
 	MORSE_CHIP_IF_PAGESET,
+	MORSE_CHIP_IF_YAPS
 };
 
 /** Event flags for talking to chip interface from skbq or pager */
@@ -40,7 +42,7 @@ enum morse_chip_if_event_flags {
 	MORSE_TX_PACKET_FREED_UP_PEND,
 	MORSE_DATA_TRAFFIC_PAUSE_PEND,
 	MORSE_DATA_TRAFFIC_RESUME_PEND,
-	MORSE_TX_TIME_CRITICAL_BEACON_PEND,
+	MORSE_YAPS_STATUS_REG_READ_PEND,
 };
 
 struct chip_if_ops {
@@ -159,6 +161,9 @@ struct morse_chip_if_state {
 			DECLARE_KFIFO(tx_status_addrs, u32,
 				       MORSE_PAGER_BYPASS_TX_STATUS_FIFO_DEPTH);
 			struct morse_pager_pkt_memory pkt_memory;
+		};
+		struct {
+			struct morse_yaps *yaps;
 		};
 	};
 	/* See enum morse_chip_if_event_flags for values */

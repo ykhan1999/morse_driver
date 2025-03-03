@@ -16,6 +16,8 @@
 /* These values were derived from mac80211 scan.c */
 /** Default time to dwell on a scan channel */
 #define MORSE_HWSCAN_DEFAULT_DWELL_TIME_MS (30)
+/** Default time to dwell on a scan channel for passive scan */
+#define MORSE_HWSCAN_DEFAULT_PASSIVE_DWELL_TIME_MS (110)
 /** Default time to dwell on home channel, in between scan channels */
 #define MORSE_HWSCAN_DEFAULT_DWELL_ON_HOME_MS (200)
 /** Typical time it takes to send the probe */
@@ -475,6 +477,7 @@ static int hw_scan_initalise_channel_and_power_lists(struct morse_hw_scan_params
 	int num_pwrs_coarse = 0;
 	int last_pwr = INT_MIN;
 	int chans_to_allocate = 0;
+	bool optimize_channel_list = !params->survey;
 
 	/* should not already be filled.. */
 	MORSE_WARN_ON(FEATURE_ID_HWSCAN, params->channels);
@@ -492,7 +495,7 @@ static int hw_scan_initalise_channel_and_power_lists(struct morse_hw_scan_params
 		 * primary variants. Ensure there is space for them.
 		 */
 		op_bw = ch_flag_to_chan_bw(chan->ch.flags);
-		if (op_bw > 2)
+		if (optimize_channel_list && op_bw > 2)
 			chans_to_allocate += ((op_bw / 1) + (op_bw / 2));
 		else
 			chans_to_allocate++;
@@ -511,7 +514,7 @@ static int hw_scan_initalise_channel_and_power_lists(struct morse_hw_scan_params
 		if (!chan)
 			continue;
 
-		if (ch_flag_to_chan_bw(chan->ch.flags) > 2)
+		if (optimize_channel_list && ch_flag_to_chan_bw(chan->ch.flags) > 2)
 			deconstruct_scan_channel_into_scan_list(params, chan);
 		else
 			insert_channel_into_hw_scan_list(params, chan);
@@ -733,8 +736,14 @@ int morse_ops_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	params->hw = hw;
 	params->vif = vif;
 	params->has_directed_ssid = (req->ssids && req->ssids[0].ssid_len > 0);
-	params->dwell_time_ms = req->duration ?	MORSE_TU_TO_MS(req->duration) :
-		MORSE_HWSCAN_DEFAULT_DWELL_TIME_MS;
+
+	if (req->duration)
+		params->dwell_time_ms = MORSE_TU_TO_MS(req->duration);
+	else if (req->n_ssids == 0)
+		params->dwell_time_ms = MORSE_HWSCAN_DEFAULT_PASSIVE_DWELL_TIME_MS;
+	else
+		params->dwell_time_ms = MORSE_HWSCAN_DEFAULT_DWELL_TIME_MS;
+
 	params->start = true;
 	/* We only care about survey records when doing ACS / AP things */
 	params->survey = (vif->type == NL80211_IFTYPE_AP);
@@ -744,9 +753,13 @@ int morse_ops_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	params->use_1mhz_probes = morse_mac_is_1mhz_probe_req_enabled();
 
 	hw_scan_initalise_channel_and_power_lists(params, &hw_req->req);
-	ret = hw_scan_initialise_probe_req(params, hw_req);
-	if (ret)
-		MORSE_HWSCAN_ERR(mors, "Failed to init probe req %d\n", ret);
+
+	/* Only initialise the probe request template if this is an active scan */
+	if (req->n_ssids > 0) {
+		ret = hw_scan_initialise_probe_req(params, hw_req);
+		if (ret)
+			MORSE_HWSCAN_ERR(mors, "Failed to init probe req %d\n", ret);
+	}
 
 	ret = morse_cmd_hw_scan(mors, params, false);
 
@@ -852,7 +865,7 @@ exit:
 	cancel_delayed_work_sync(&mors->hw_scan.timeout);
 }
 
-void morse_hw_scan_timeout_work(struct work_struct *work)
+static void morse_hw_scan_timeout_work(struct work_struct *work)
 {
 	struct morse *mors = container_of(work, struct morse, hw_scan.timeout.work);
 

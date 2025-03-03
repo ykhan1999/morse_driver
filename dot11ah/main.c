@@ -87,7 +87,7 @@ struct morse_dot11ah_cssid_item *morse_dot11ah_find_cssid_item_for_bssid(const u
 }
 
 /** Use of this function and any returned items must be protected with cssid_list_lock */
-struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN])
+struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(const u8 bssid[ETH_ALEN])
 {
 	struct morse_dot11ah_cssid_item *item, *tmp;
 
@@ -209,7 +209,8 @@ exit:
  * Exported functions used elsewhere in morse driver
  */
 
-bool morse_mac_find_channel_info_for_bssid(u8 bssid[ETH_ALEN], struct morse_channel_info *info)
+bool morse_mac_find_channel_info_for_bssid(const u8 bssid[ETH_ALEN],
+					   struct morse_channel_info *info)
 {
 	bool found = false;
 	u8 *op = NULL;

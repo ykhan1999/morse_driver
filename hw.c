@@ -83,7 +83,6 @@ int morse_hw_irq_handle(struct morse *mors)
 	int i;
 #endif
 
-	morse_claim_bus(mors);
 	morse_reg32_read(mors, MORSE_REG_INT1_STS(mors), &status1);
 
 	if (status1 & MORSE_CHIP_IF_IRQ_MASK_ALL)
@@ -96,7 +95,6 @@ int morse_hw_irq_handle(struct morse *mors)
 		to_host_hw_stop_irq_handle(mors);
 
 	morse_reg32_write(mors, MORSE_REG_INT1_CLR(mors), status1);
-	morse_release_bus(mors);
 
 #if defined(CONFIG_MORSE_DEBUG_IRQ)
 	mors->debug.hostsync_stats.irq++;
@@ -186,6 +184,13 @@ bool morse_hw_is_valid_chip_id(u32 chip_id, u32 *valid_chip_ids)
 int morse_hw_regs_attach(struct morse_hw_cfg *cfg, u32 chip_id)
 {
 	int ret = 0;
+	u32 id = MORSE_DEVICE_GET_CHIP_ID(chip_id);
+	/* MM6108XX should already have the regs attached to the config */
+	switch (id) {
+	case (MM8108XX_ID):
+		cfg->regs = &mm8108_regs;
+		break;
+	}
 	return ret;
 }
 
@@ -219,6 +224,15 @@ int morse_chip_cfg_init(struct morse *mors, u32 chip_id)
 	mors->chip_id = chip_id;
 
 	switch (chip_id) {
+	case(MM8108B0_ID):
+	case(MM8108B1_ID):
+	case(MM8108B2_ID):
+	case(MM8108B0_FPGA_ID):
+	case(MM8108B1_FPGA_ID):
+	case(MM8108B2_FPGA_ID):
+		mors->cfg = &mm8108_cfg;
+		mors->cfg->regs = &mm8108_regs;
+		break;
 	case(MM6108A0_ID):
 	case(MM6108A1_ID):
 	case(MM6108A2_ID):
