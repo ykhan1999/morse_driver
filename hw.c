@@ -1,30 +1,22 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
 #include <linux/types.h>
 #include <linux/gpio.h>
-
 #include "morse.h"
 #include "debug.h"
 #include "hw.h"
 #include "pager_if.h"
 #include "bus.h"
+
+static int hw_reload_after_stop __read_mostly = 5;
+module_param(hw_reload_after_stop, int, 0644);
+MODULE_PARM_DESC(hw_reload_after_stop,
+"Reload HW after a stop notification. Abort if stop events are less than this seconds apart (-1 to disable)");
 
 int morse_hw_irq_enable(struct morse *mors, u32 irq, bool enable)
 {
@@ -45,6 +37,45 @@ int morse_hw_irq_enable(struct morse *mors, u32 irq, bool enable)
 	return 0;
 }
 
+void morse_hw_stop_work(struct work_struct *work)
+{
+	struct morse *mors = container_of(work, struct morse, hw_stop);
+
+	if (!mors->started) {
+		dev_err(mors->dev, "HW already stopped\n");
+		return;
+	}
+
+	if (hw_reload_after_stop > 0 &&
+	    (ktime_get_seconds() - mors->last_hw_stop) < hw_reload_after_stop) {
+		/* HW reload was attempted twice in rapid succession - abort to prevent thrashing */
+		dev_err(mors->dev,
+			"Automatic HW reload aborted due to retry in < %ds\n",
+			hw_reload_after_stop);
+		return;
+	}
+
+	mutex_lock(&mors->lock);
+	if (!morse_coredump_new(mors, MORSE_COREDUMP_REASON_CHIP_INDICATED_STOP))
+		set_bit(MORSE_STATE_FLAG_DO_COREDUMP, &mors->state_flags);
+
+	set_bit(MORSE_STATE_FLAG_CHIP_UNRESPONSIVE, &mors->state_flags);
+	mors->last_hw_stop = ktime_get_seconds();
+	mutex_unlock(&mors->lock);
+	schedule_work(&mors->driver_restart);
+}
+
+static void to_host_hw_stop_irq_handle(struct morse *mors)
+{
+	dev_err(mors->dev, "HW has stopped%s\n",
+		(hw_reload_after_stop < 0) ? " (ignoring)" : "");
+
+	if (hw_reload_after_stop < 0)
+		return;
+
+	schedule_work(&mors->hw_stop);
+}
+
 int morse_hw_irq_handle(struct morse *mors)
 {
 	u32 status1 = 0;
@@ -54,12 +85,16 @@ int morse_hw_irq_handle(struct morse *mors)
 
 	morse_claim_bus(mors);
 	morse_reg32_read(mors, MORSE_REG_INT1_STS(mors), &status1);
+
 	if (status1 & MORSE_CHIP_IF_IRQ_MASK_ALL)
 		mors->cfg->ops->chip_if_handle_irq(mors, status1);
 	if (status1 & MORSE_INT_BEACON_VIF_MASK_ALL)
 		morse_beacon_irq_handle(mors, status1);
 	if (status1 & MORSE_INT_NDP_PROBE_REQ_PV0_VIF_MASK_ALL)
 		morse_ndp_probe_req_resp_irq_handle(mors, status1);
+	if (status1 & MORSE_INT_HW_STOP_NOTIFICATION)
+		to_host_hw_stop_irq_handle(mors);
+
 	morse_reg32_write(mors, MORSE_REG_INT1_CLR(mors), status1);
 	morse_release_bus(mors);
 
@@ -152,6 +187,11 @@ int morse_hw_regs_attach(struct morse_hw_cfg *cfg, u32 chip_id)
 {
 	int ret = 0;
 	return ret;
+}
+
+int morse_hw_enable_stop_notifications(struct morse *mors, bool enable)
+{
+	return morse_hw_irq_enable(mors, MORSE_INT_HW_STOP_NOTIFICATION_NUM, enable);
 }
 
 int morse_chip_cfg_detect_and_init(struct morse *mors, struct morse_chip_series *mors_chip_series)

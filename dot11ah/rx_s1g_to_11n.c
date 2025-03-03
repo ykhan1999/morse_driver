@@ -1,19 +1,7 @@
 /*
  * Copyright 2020 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/types.h>
@@ -440,9 +428,9 @@ static u8 *morse_dot11_insert_ht_and_vht_ie(u8 *pos, struct ieee80211_rx_status 
 }
 
  /* Insert RSN and RSNX IE for the BSSID taken from CSSID list before
-  * forwarding beacon to mac80211
+  * forwarding beacon to mac80211 or storing beacon IEs
   */
-static u8 *morse_dot11_insert_rsn_and_rsnx_ie(u8 *pos, struct dot11ah_update_rx_beacon_vals *vals,
+u8 *morse_dot11_insert_rsn_and_rsnx_ie(u8 *pos, struct dot11ah_update_rx_beacon_vals *vals,
 		const struct dot11ah_ies_mask *ies_mask)
 {
 	const u8 *rsn_ie = morse_dot11_find_ie(WLAN_EID_RSN, vals->cssid_ies, vals->cssid_ies_len);
@@ -1014,7 +1002,7 @@ static void morse_dot11ah_s1g_to_beacon(struct ieee80211_vif *vif, struct sk_buf
 	/* Store SSID or restore it */
 	if (ies_mask->ies[network_id_eid].ptr) {
 		morse_dot11ah_store_cssid(ies_mask, updated_vals.capab_info, s1g_ies, s1g_ies_len,
-					  s1g_beacon->u.s1g_beacon.sa);
+					  s1g_beacon->u.s1g_beacon.sa, &updated_vals);
 
 		/* Fill in fc_bss_bw_subfield here, otherwise it will be
 		 * always set to 255 when DTIM period is 1 (no short beacons)
@@ -1247,6 +1235,8 @@ static void morse_dot11ah_s1g_to_probe_resp(struct ieee80211_vif *vif, struct sk
 	u8 *pos;
 	u8 *da;
 	bool frame_good = false;
+	struct dot11ah_short_beacon_ie *s1g_short_bcn = (struct dot11ah_short_beacon_ie *)
+						ies_mask->ies[WLAN_EID_S1G_SHORT_BCN_INTERVAL].ptr;
 
 	if (length_11n <= 0)
 		goto exit;
@@ -1265,7 +1255,7 @@ static void morse_dot11ah_s1g_to_probe_resp(struct ieee80211_vif *vif, struct sk
 
 	/* Create/Update the S1G IES for this cssid/bssid entry */
 	morse_dot11ah_store_cssid(ies_mask, s1g_probe_resp->u.probe_resp.capab_info, s1g_ies,
-				  s1g_ies_len, s1g_probe_resp->bssid);
+				  s1g_ies_len, s1g_probe_resp->bssid, NULL);
 
 	probe_resp = kmalloc(length_11n, GFP_KERNEL);
 	if (!probe_resp)
@@ -1276,6 +1266,8 @@ static void morse_dot11ah_s1g_to_probe_resp(struct ieee80211_vif *vif, struct sk
 
 	/* Fill in the new probe request header, copied from incoming frame */
 	memcpy(probe_resp, s1g_probe_resp, header_length);
+	if (s1g_short_bcn)
+		probe_resp->u.probe_resp.beacon_int = s1g_short_bcn->short_beacon_int;
 
 	pos = probe_resp->u.probe_resp.variable;
 

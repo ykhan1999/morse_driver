@@ -1,19 +1,7 @@
 /*
  * Copyright 2020 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/types.h>
@@ -116,7 +104,8 @@ struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN])
 }
 
 void morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
-			      int s1g_ies_len, const u8 *bssid)
+			       int s1g_ies_len, const u8 *bssid,
+			       struct dot11ah_update_rx_beacon_vals *vals)
 {
 	/**
 	 * Kernel allocations in this function must be atomic as it occurs
@@ -141,19 +130,44 @@ void morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info
 	stored = morse_dot11ah_find_cssid_item_for_bssid(bssid);
 
 	if (stored) {
+		int s1g_ies_len_updated = s1g_ies_len;
+		bool update_beacon = (vals && vals->cssid_ies);
+
 		if (stored->capab_info != capab_info && capab_info != 0)
 			stored->capab_info = capab_info;
 
-		if (stored->ies_len != s1g_ies_len && s1g_ies) {
+		if (update_beacon && s1g_ies) {
+			/* Get the RSN/RSNX IE from stored IEs to update incoming beacon IEs */
+			const u8 *rsn_ie = morse_dot11_find_ie(WLAN_EID_RSN, vals->cssid_ies,
+						vals->cssid_ies_len);
+			const u8 *rsnx_ie = morse_dot11_find_ie(WLAN_EID_RSNX, vals->cssid_ies,
+						vals->cssid_ies_len);
+
+			/* Update IEs length with RSN/RSNX IE if present */
+			if (rsn_ie && !ies_mask->ies[WLAN_EID_RSN].ptr)
+				s1g_ies_len_updated += *(rsn_ie + 1) + 2;
+			if (rsnx_ie && !ies_mask->ies[WLAN_EID_RSNX].ptr)
+				s1g_ies_len_updated += *(rsnx_ie + 1) + 2;
+		}
+
+		if (stored->ies_len != s1g_ies_len_updated && s1g_ies) {
 			kfree(stored->ies);
 
-			stored->ies = kmalloc(s1g_ies_len, GFP_ATOMIC);
+			stored->ies = kmalloc(s1g_ies_len_updated, GFP_ATOMIC);
 			if (!stored->ies) {
 				stored->ies_len = 0;
 				goto exit;
 			}
+
 			memcpy(stored->ies, s1g_ies, s1g_ies_len);
-			stored->ies_len = s1g_ies_len;
+			stored->ies_len = s1g_ies_len_updated;
+
+			/* Update beacon IEs with stored RSN and RSNX IE (from probe response)
+			 * before storing again.
+			 */
+			if (update_beacon)
+				morse_dot11_insert_rsn_and_rsnx_ie(stored->ies + s1g_ies_len, vals,
+								   ies_mask);
 		}
 
 		memcpy(stored->bssid, bssid, ETH_ALEN);
@@ -336,7 +350,7 @@ bool morse_dot11ah_add_mesh_peer(struct dot11ah_ies_mask *ies_mask, u16 capab_in
 		return false;
 
 	/* Create entry for this new mesh peer */
-	morse_dot11ah_store_cssid(ies_mask, capab_info, NULL, 0, peer_mac_addr);
+	morse_dot11ah_store_cssid(ies_mask, capab_info, NULL, 0, peer_mac_addr, NULL);
 
 	return true;
 }
@@ -344,13 +358,24 @@ EXPORT_SYMBOL(morse_dot11ah_add_mesh_peer);
 
 bool morse_dot11ah_del_mesh_peer(const u8 *peer_mac_addr)
 {
+	struct morse_dot11ah_cssid_item *item, *tmp;
+	u64 bssid_64;
 	bool ret = false;
 
 	if (!peer_mac_addr)
 		return false;
+	bssid_64 = mac2uint64(peer_mac_addr);
 
 	spin_lock_bh(&cssid_list_lock);
-	ret = morse_dot11ah_find_cssid_item_for_bssid(peer_mac_addr);
+	list_for_each_entry_safe(item, tmp, &cssid_list, list) {
+		if (mac2uint64(item->bssid) == bssid_64) {
+			list_del(&item->list);
+			kfree(item->ies);
+			kfree(item);
+			ret = true;
+			break;
+		}
+	}
 	spin_unlock_bh(&cssid_list_lock);
 
 	return ret;

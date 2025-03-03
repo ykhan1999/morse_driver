@@ -4,19 +4,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/types.h>
@@ -29,16 +17,36 @@
  * 802.11REVme 9.4.2.202 and 11.3.9.2
  */
 
-#define CAC_THRESHOLD_MAX	1023	/* IEEE 802.11REVme 9.4.2.202 */
-#define CAC_THRESHOLD_STEP	64	/* Threshold steps up and down by this much */
-#define CAC_INDEX_MAX		((CAC_THRESHOLD_MAX + 1) / CAC_THRESHOLD_STEP)
-#define CAC_RANDOM_MAX		(CAC_THRESHOLD_MAX - 1)	/* IEEE 802.11REVme 11.3.9.2 */
+/** CAC threshold max, from IEEE 802.11REVme section 9.4.2.202 */
+#define CAC_THRESHOLD_MAX	(1023)
+
+#define CAC_CFG_CHANGE_RULE_MAX		(8)
 
 struct morse_vif;
 
 enum cac_command {
 	CAC_COMMAND_DISABLE = 0,
-	CAC_COMMAND_ENABLE = 1
+	CAC_COMMAND_ENABLE = 1,
+	CAC_COMMAND_CFG_GET = 2,
+	CAC_COMMAND_CFG_SET = 3
+};
+
+/** CAC threshold change rule */
+struct cac_threshold_change_rule {
+	/* Threshold in Authentication Request Frames per Second */
+	u16 arfs;
+	/** Change in threshold to apply if condition is matched, between -CAC_THRESHOLD_MAX and
+	 * CAC_THRESHOLD_MAX.
+	 */
+	s16 threshold_change;
+};
+
+/**
+ * CAC threshold change rules (AP only).
+ */
+struct cac_threshold_change_rules {
+	u8 rule_tot;
+	struct cac_threshold_change_rule rule[CAC_CFG_CHANGE_RULE_MAX];
 };
 
 /**
@@ -57,25 +65,46 @@ struct morse_cac {
 	bool enabled;
 
 	/**
-	 * Threshold value for restricting authentications and associations, stored as a
-	 * factor of CAC_THRESHOLD_MAX.
+	 * Threshold change rules
+	 */
+	struct cac_threshold_change_rules rules;
+
+	/**
+	 * Threshold value for restricting authentications and associations, between 0 and
+	 * CAC_THRESHOLD_MAX.
 	 * A value of CAC_INDEX_MAX means there are no restrictions.
-	 * A value of 0 will mean that only STAs already associating or not supporting CAC can
+	 * A value of 0 means that only STAs already associating or not supporting CAC can
 	 * associate.
 	 */
-	u8 threshold_index;
+	u16 threshold_value;
 
 	/**
 	 * Authentication request frames received.
 	 */
-	u32 arfs;
+	u16 arfs;
 };
+
+/** Convert a threshold percentage into a raw value */
+static inline s16 cac_threshold_pc2val(s16 val)
+{
+	return val * CAC_THRESHOLD_MAX / 100;
+}
+
+/** Convert a raw value into a threshold percentage
+ *  The value is rounded up for consistency with values rounded down by cac_threshold_pc2val.
+ */
+static inline s16 cac_threshold_val2pc(s16 val)
+{
+	if (val < 0)
+		return (val * 100 - (CAC_THRESHOLD_MAX - 1)) / CAC_THRESHOLD_MAX;
+	else
+		return (val * 100 + CAC_THRESHOLD_MAX - 1) / CAC_THRESHOLD_MAX;
+}
 
 /**
  * @brief Keep a count of received initial authentication request packets (AP only).
  */
-void morse_cac_count_auth(const struct ieee80211_vif *vif,
-			  const struct ieee80211_mgmt *hdr, size_t len);
+void morse_cac_count_auth(const struct ieee80211_vif *vif, const struct ieee80211_mgmt *hdr);
 
 /**
  * morse_cac_insert_ie() - Insert a CAC IE into an sk_buff
@@ -94,6 +123,24 @@ void morse_cac_insert_ie(struct dot11ah_ies_mask *ies_mask, struct ieee80211_vif
  * Return: True if CAC is enabled on the interface
  */
 bool morse_cac_is_enabled(struct morse_vif *mors_vif);
+
+/**
+ * morse_cac_get_rules() - Get threshold change rules
+ *
+ * @mors_vif	Virtual interface
+ * @rules	Structure to receive threshold change rules
+ * @rule_tot	Field to receive number of rules
+ */
+void morse_cac_get_rules(struct morse_vif *mors_vif, struct cac_threshold_change_rules *rules,
+			 u8 *rule_tot);
+
+/**
+ * morse_cac_set_rules() - Configure threshold change rules
+ *
+ * @mors_vif	Virtual interface
+ * @rules	Threshold change rules
+ */
+void morse_cac_set_rules(struct morse_vif *mors_vif, struct cac_threshold_change_rules *rules);
 
 /**
  * morse_cac_deinit() - De-initialise CAC on an interface

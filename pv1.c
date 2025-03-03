@@ -1,19 +1,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/types.h>
@@ -91,6 +79,7 @@ static void morse_mac_process_hc_request(struct morse *mors, struct morse_vif *m
 	rx_request->a1_a3_differ = store_a3;
 	rx_request->a2_a4_differ = store_a4;
 	rx_request->action_dialog_token = dialog_token;
+	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
 	mors_vif->pv1.rx_pv1_sta = sta;
 
 	if (store_a3) {
@@ -126,18 +115,21 @@ static void morse_mac_process_hc_response(struct morse_dot11ah_s1g_action *mgmt,
 	if (!mors_vif->enable_pv1)
 		return;
 
+	/* Must be held while finding and dereferencing sta */
+	rcu_read_lock();
+
 	sta = ieee80211_find_sta(vif, mgmt->sa);
 	if (!sta)
-		return;
+		goto exit;
 
 	mors_sta = (struct morse_sta *)sta->drv_priv;
 
 	if (!mors_sta || !mors_sta->pv1_frame_support)
-		return;
+		goto exit;
 
 	resp_status = &mors_sta->tx_pv1_ctx;
 	if (!resp_status)
-		return;
+		goto exit;
 
 	resp_status->a3_stored = hc_ie_data->header_compression_control &
 				DOT11AH_PV1_HEADER_COMPRESSION_STORE_A3;
@@ -162,11 +154,14 @@ static void morse_mac_process_hc_response(struct morse_dot11ah_s1g_action *mgmt,
 			memset(resp_status->stored_a4, 0, sizeof(resp_status->stored_a4));
 	}
 
+	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
 	mors_vif->pv1.tx_pv1_sta = sta;
 
 	if (resp_status->a3_stored || resp_status->a4_stored)
 		schedule_work(&mors_vif->pv1.hc_resp_work);
 	mutex_unlock(&mors_vif->pv1.lock);
+exit:
+	rcu_read_unlock();
 }
 
 void morse_mac_process_pv1_action_frame(struct morse_dot11ah_s1g_action *mgmt,
@@ -192,18 +187,23 @@ void morse_mac_process_pv1_action_frame(struct morse_dot11ah_s1g_action *mgmt,
 	if (mgmt->u.pv1_action.action_code != WLAN_S1G_HEADER_COMPRESSION)
 		return;
 
+	/* Must be held while finding and dereferencing sta */
+	rcu_read_lock();
+
 	sta = ieee80211_find_sta(vif, mgmt->sa);
 	if (!sta)
-		return;
+		goto exit;
 
 	mors_sta = (struct morse_sta *)sta->drv_priv;
 	if (!mors_sta || !mors_sta->pv1_frame_support)
-		return;
+		goto exit;
 
 	if (is_response)
 		morse_mac_process_hc_response(mgmt, vif, hc_ie_data);
 	else
 		morse_mac_process_hc_request(mors, mors_vif, hc_ie_data, sta, dialog_token);
+exit:
+	rcu_read_unlock();
 }
 
 void morse_pv1_a3_a4_check(struct morse_vif *mors_vif, struct ieee80211_sta *pubsta,
@@ -345,6 +345,7 @@ void morse_mac_send_pv1_hc_action_frame(struct morse *mors,
 				ies_mask->ies[WLAN_EID_HEADER_COMPRESSION].len);
 	}
 
+	IEEE80211_SKB_CB(skb)->control.vif = vif;
 	morse_mac_fill_tx_info(mors, &tx_info, skb, vif,
 		mors->custom_configs.channel_info.op_bw_mhz, sta);
 
@@ -642,32 +643,32 @@ static void morse_convert_pv1_to_pv0_qos_ctrl(u8 *qos, u16 fc)
 }
 
 /**
- * morse_pv1_find_sta_by_aid - Get STA context of AP based on sta AID derived
- *                          from SID of PV1 header
- * @mors_vif:     Valid AP iface
- * @aid:         Association ID of STA with AP
+ * morse_pv1_find_sta_by_aid - Get STA context of AP based on STA AID, derived
+ *				from SID of PV1 header
  *
- * @retun:       Pointer to STA context
+ * @mors_vif:	AP interface
+ * @aid:	Association ID of STA
+ *
+ * @return:	STA context structure
+ *
+ * @note:	The RCU lock must be held when calling this function and while using the returned
+ *		pointer.
  */
 static struct ieee80211_sta *morse_pv1_find_sta_by_aid(struct morse_vif *mors_vif, u16 aid)
 {
 	struct list_head *morse_sta_list = &mors_vif->ap->stas;
 	struct list_head *pos;
 
-	rcu_read_lock();
 	list_for_each(pos, morse_sta_list) {
 		struct morse_sta *msta = list_entry(pos, struct morse_sta, list);
 
 		if (msta) {
 			struct ieee80211_sta *sta =
 				container_of((void *)msta, struct ieee80211_sta, drv_priv);
-			if (sta->aid == aid) {
-				rcu_read_unlock();
+			if (sta->aid == aid)
 				return sta;
-			}
 		}
 	}
-	rcu_read_unlock();
 
 	return NULL;
 }
@@ -690,8 +691,8 @@ struct ieee80211_sta *morse_pv1_find_sta(struct ieee80211_vif *vif,
 			sid = le16_to_cpu(sid_header->u.from_ds.addr1_sid);
 		else
 			sid = le16_to_cpu(sid_header->u.to_ds.addr2_sid);
-
 		aid = le16_to_cpu(sid & DOT11_MAC_PV1_SID_AID_MASK);
+
 		if (vif->type == NL80211_IFTYPE_AP)
 			sta = morse_pv1_find_sta_by_aid(mors_vif, aid);
 		else if (vif->type == NL80211_IFTYPE_STATION)
@@ -733,6 +734,10 @@ static int morse_prepare_pv0_mac_header(struct morse_vif *mors_vif,
 				(struct dot11ah_mac_pv1_qos_data_sid_hdr *)pv1_hdr;
 		u16 sid;
 		u8 *tmp = sid_header->variable;
+
+		/* Must be held while finding and dereferencing sta */
+		rcu_read_lock();
+
 		/* Find STA interface that have stored PV1 context */
 		sta = morse_pv1_find_sta(vif, pv1_hdr);
 
@@ -778,6 +783,8 @@ static int morse_prepare_pv0_mac_header(struct morse_vif *mors_vif,
 			pv0_fc |= IEEE80211_FCTL_TODS | IEEE80211_FCTL_FROMDS;
 		}
 
+		rcu_read_unlock();
+
 		pv0_hdr->seq_ctrl = sid_header->sequence_ctrl;
 	} else if (pv1_fc_type == DOT11_MAC_PV1_FRAME_TYPE_QOS_DATA) {
 		struct dot11ah_mac_pv1_qos_data_hdr *qos_data_hdr =
@@ -822,8 +829,9 @@ static void morse_prepare_ccmp_header(struct sk_buff *skb)
 }
 
 int morse_mac_convert_pv1_to_pv0(struct morse *mors, struct morse_vif *mors_vif,
-				struct sk_buff *skb, struct morse_skb_rx_status *hdr_rx_status,
-				struct dot11ah_mac_pv1_hdr *pv1_hdr)
+				 struct sk_buff *skb,
+				 const struct morse_skb_rx_status *hdr_rx_status,
+				 struct dot11ah_mac_pv1_hdr *pv1_hdr)
 {
 	u16 pv0_fc;
 	int pv1_hdr_size;
@@ -892,6 +900,7 @@ static void morse_pv1_process_hc_resp_work(struct work_struct *work)
 {
 	struct morse_pv1 *pv1 = container_of(work, struct morse_pv1, hc_resp_work);
 	struct morse_vif *mors_vif = container_of(pv1, struct morse_vif, pv1);
+	/* FIXME sta cannot be held without an RCU lock - this must be fixed */
 	struct ieee80211_sta *sta = mors_vif->pv1.tx_pv1_sta;
 	struct morse *mors = morse_vif_to_morse(mors_vif);
 	struct morse_sta_pv1 *resp_status;

@@ -1,19 +1,7 @@
 /*
  * Copyright 2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <linux/ieee80211.h>
@@ -117,12 +105,12 @@ static int morse_vendor_ie_clear_ie_list(struct morse_vif *mors_vif, u16 mgmt_ty
  *			 of type @ref enum morse_vendor_ie_mgmt_type_flags
  * @return 0 on success, else error code
  */
-static int morse_vendor_ie_process_rx_ies(struct ieee80211_vif *vif, u8 *ies, u16 length,
+static int morse_vendor_ie_process_rx_ies(struct ieee80211_vif *vif, const u8 *ies, u16 length,
 					  u16 mgmt_type)
 {
 	int ret = 0;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
-	struct ieee80211_vendor_ie *vie = (struct ieee80211_vendor_ie *)ies;
+	const struct ieee80211_vendor_ie *vie = (const struct ieee80211_vendor_ie *)ies;
 	const u8 *pos = ies;
 	const u8 *const end = ies + length;
 	struct vendor_ie_oui_filter_list_item *item;
@@ -133,7 +121,7 @@ static int morse_vendor_ie_process_rx_ies(struct ieee80211_vif *vif, u8 *ies, u1
 		if (!pos)
 			break;
 
-		vie = (struct ieee80211_vendor_ie *)pos;
+		vie = (const struct ieee80211_vendor_ie *)pos;
 
 		if (vie->len >= min_vendor_ie_length) {
 			spin_lock_bh(&mors_vif->vendor_ie.lock);
@@ -224,8 +212,7 @@ static void try_remove_oui(struct morse_vif *mors_vif,
 static int morse_vendor_ie_add_oui_to_filter(struct morse_vif *mors_vif, u16 mgmt_type_mask,
 					     u8 *oui,
 					     int (*on_vendor_ie_match)(struct ieee80211_vif *, u16,
-								       struct ieee80211_vendor_ie
-								       *))
+					     const struct ieee80211_vendor_ie *))
 {
 	int ret = 0;
 	struct vendor_ie_oui_filter_list_item *item;
@@ -369,12 +356,12 @@ int morse_vendor_ie_add_ies(struct morse_vif *mors_vif,
 	return 0;
 }
 
-void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, struct sk_buff *skb)
+void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, const struct sk_buff *skb)
 {
-	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)skb->data;
+	const struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)skb->data;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	enum morse_vendor_ie_mgmt_type_flags type;
-	u8 *elements;
+	const u8 *elements;
 	u16 elem_len;
 
 	if (list_empty(&mors_vif->vendor_ie.oui_filter_list))

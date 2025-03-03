@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "morse.h"
@@ -69,7 +57,7 @@ struct vendor_ie_oui_filter_list_item {
 	 * @return 0 on success, else error code
 	 */
 	int (*on_vendor_ie_match)(struct ieee80211_vif *vif,
-				  u16 frame_type, struct ieee80211_vendor_ie *vie);
+				  u16 frame_type, const struct ieee80211_vendor_ie *vie);
 };
 
 /**
@@ -119,7 +107,7 @@ int morse_vendor_ie_add_ies(struct morse_vif *mors_vif,
  * @vif virtual interface the beacon was received on
  * @skb the management frame SKB
  */
-void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, struct sk_buff *skb);
+void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, const struct sk_buff *skb);
 
 /**
  * Handle a vendor IE config command

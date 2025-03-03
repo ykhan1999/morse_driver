@@ -8,7 +8,7 @@ else
 endif
 
 # Set 0 to a version number. This is done to match the Linux expectations
-override MORSE_VERSION = "0-rel_1_12_4_2024_Jun_11-6-g63cd0768"
+override MORSE_VERSION = "0-rel_1_13_3_2024_Nov_11"
 
 USING_CLANG := $(shell $(CC) -v 2>&1 | grep -c "clang version")
 
@@ -28,8 +28,12 @@ ccflags-$(CONFIG_MORSE_ENABLE_TEST_MODES) += "-DCONFIG_MORSE_ENABLE_TEST_MODES"
 ccflags-$(CONFIG_MORSE_HW_TRACE) += "-DCONFIG_MORSE_HW_TRACE"
 ccflags-$(CONFIG_MORSE_DEBUG_IRQ) += "-DCONFIG_MORSE_DEBUG_IRQ"
 ccflags-$(CONFIG_MORSE_DEBUG_TXSTATUS) += "-DCONFIG_MORSE_DEBUG_TXSTATUS"
-ccflags-$(CONFIG_MORSE_RC) += "-DCONFIG_MORSE_RC"
-ccflags-$(CONFIG_MORSE_RC) += "-I$(src)/mmrc"
+
+ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
+	ccflags-y += "-DCONFIG_MORSE_RC"
+	ccflags-y += "-I$(src)/mmrc"
+endif
+
 ccflags-$(CONFIG_MORSE_IPMON) += "-DCONFIG_MORSE_IPMON"
 ccflags-$(CONFIG_MORSE_MONITOR) += "-DCONFIG_MORSE_MONITOR"
 
@@ -58,6 +62,10 @@ ccflags-y += "-DCONFIG_MORSE_POWERSAVE_MODE=$(CONFIG_MORSE_POWERSAVE_MODE)"
 
 CONFIG_MORSE_SDIO_ALIGNMENT ?= 2
 ccflags-y += "-DCONFIG_MORSE_SDIO_ALIGNMENT=$(CONFIG_MORSE_SDIO_ALIGNMENT)"
+
+ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
+	ccflags-y += "-DCONFIG_MORSE_RC"
+endif
 
 ifeq ($(CONFIG_MORSE_DHCP_OFFLOAD),y)
 	ccflags-y += "-DENABLE_DHCP_OFFLOAD_DEFAULT=1"
@@ -136,13 +144,14 @@ morse-$(CONFIG_MORSE_SPI) += spi.o
 morse-$(CONFIG_MORSE_VENDOR_COMMAND) += vendor.o
 morse-$(CONFIG_MORSE_USER_ACCESS) += uaccess.o
 morse-$(CONFIG_MORSE_HW_TRACE) += hw_trace.o
-morse-$(CONFIG_MORSE_RC) += mmrc/mmrc_osal.o
-morse-$(CONFIG_MORSE_RC) += mmrc-submodule/src/core/mmrc.o
-morse-$(CONFIG_MORSE_RC) += rc.o
-morse-$(CONFIG_MORSE_RC) += mmrc_debugfs.o
 
-ifneq ($(CONFIG_MORSE_RC),y)
+ifeq ($(CONFIG_DISABLE_MORSE_RC),y)
 	morse-y += minstrel_rc.o
+else
+	morse-y += mmrc/mmrc_osal.o
+	morse-y += mmrc-submodule/src/core/mmrc.o
+	morse-y += rc.o
+	morse-y += mmrc_debugfs.o
 endif
 
 SRC := $(shell pwd)

@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <linux/skbuff.h>
@@ -37,8 +25,8 @@
  * indicated otherwise these callbacks are mandatory.
  */
 struct morse_bus_ops {
-	int (*dm_read)(struct morse *mors, u32 addr, u8 *data, u32 len);
-	int (*dm_write)(struct morse *mors, u32 addr, const u8 *data, u32 len);
+	int (*dm_read)(struct morse *mors, u32 addr, u8 *data, int len);
+	int (*dm_write)(struct morse *mors, u32 addr, const u8 *data, int len);
 	int (*reg32_read)(struct morse *mors, u32 addr, u32 *data);
 	int (*reg32_write)(struct morse *mors, u32 addr, u32 data);
 	int (*skb_tx)(struct morse *mors, struct sk_buff *skb, u8 channel);
@@ -55,13 +43,13 @@ struct morse_bus_ops {
  */
 #define MORSE_DEFAULT_BULK_ALIGNMENT	(2)
 
-static inline int morse_dm_write(struct morse *mors, u32 addr, const u8 *data, u32 len)
+static inline int morse_dm_write(struct morse *mors, u32 addr, const u8 *data, int len)
 {
 	return mors->bus_ops->dm_write(mors, addr, data, len);
 }
 
 /* morse_dm_read - len must be rounded up to the nearest 4-byte boundary */
-static inline int morse_dm_read(struct morse *mors, u32 addr, u8 *data, u32 len)
+static inline int morse_dm_read(struct morse *mors, u32 addr, u8 *data, int len)
 {
 	return mors->bus_ops->dm_read(mors, addr, data, len);
 }

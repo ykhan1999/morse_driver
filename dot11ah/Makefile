@@ -8,12 +8,15 @@ DEBFLAGS = -O2
 endif
 
 # Set 0 to a version number. This is done to match the Linux expectations
-override MORSE_VERSION = "0-rel_1_12_4_2024_Jun_11-6-g63cd0768"
+override MORSE_VERSION = "0-rel_1_13_3_2024_Nov_11"
 
 #ccflags-y += $(DEBFLAGS) -Werror
 ccflags-y += "-DMORSE_VERSION=$(MORSE_VERSION)"
-ccflags-$(CONFIG_MORSE_RC) += "-DCONFIG_MORSE_RC"
-ccflags-$(CONFIG_MORSE_RC) += "-I$(src)/../mmrc"
+
+ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
+	ccflags-y += "-DCONFIG_MORSE_RC"
+	ccflags-y += "-I$(src)/../mmrc"
+endif
 
 ifneq ($(CONFIG_BACKPORT_VERSION),)
 # Convert a version string from "vX.Y.Z-stuff" into an integer for comparison with KERNEL_VERSION
@@ -31,7 +34,8 @@ dot11ah-y = main.o \
 	    tim.o \
 	    reg.o \
 	    s1g_ieee80211.o \
-	    s1g_channels.o
+	    s1g_channels.o \
+	    reg_rules.o
 
 SRC := $(shell pwd)
 

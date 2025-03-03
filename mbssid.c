@@ -1,19 +1,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <linux/timer.h>
 #include <linux/bitfield.h>
@@ -230,8 +218,7 @@ void morse_mbssid_insert_ie(struct morse_vif *mors_vif, struct morse *mors,
 int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 					struct dot11ah_ies_mask *ies_mask,
 					struct ieee80211_vif *vif,
-					struct morse_skb_rx_status *hdr_rx_status,
-					struct ieee80211_rx_status *rx_status, int length_11n)
+					const struct morse_skb_rx_status *hdr_rx_status)
 {
 	struct ieee80211_hdr *hdr;
 	struct ieee80211_mgmt *mgmt;
@@ -246,9 +233,14 @@ int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 	u32 mbssid_ie_offset;
 	struct mbssid_ie ie_elem;
 	struct ieee80211_hw *hw = mors->hw;
+	int bcn_length_11n;
 
 	if (!ies_mask->ies[WLAN_EID_MULTIPLE_BSSID].ptr)
 		return -ENOMEM;
+
+	bcn_length_11n = morse_dot11ah_s1g_to_11n_rx_packet_size(vif, skb, ies_mask);
+	if (bcn_length_11n <= 0)
+		return -EINVAL;
 
 	mbssid_ie = ies_mask->ies[WLAN_EID_MULTIPLE_BSSID].ptr;
 	mbssid_ie_len = ies_mask->ies[WLAN_EID_MULTIPLE_BSSID].len;
@@ -257,6 +249,7 @@ int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 	    sizeof(ie_elem.sub_elem.element_id) + sizeof(ie_elem.sub_elem.len);
 
 	for_each_element(sub, mbssid_ie + mbssid_ie_offset, mbssid_ie_len - mbssid_ie_offset) {
+		struct ieee80211_rx_status rx_status = {0};
 		struct sk_buff *skb_beacon;
 		int mbssid_index;
 
@@ -286,20 +279,21 @@ int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 		cfg80211_gen_new_bssid(s1g_beacon->u.s1g_beacon.sa,
 				       max_bssid_indicator, mbssid_index, new_bssid);
 		memcpy((void *)s1g_beacon->u.s1g_beacon.sa, new_bssid, ETH_ALEN);
-		morse_mac_rx_status(mors, hdr_rx_status, rx_status, skb_beacon);
-		memcpy(IEEE80211_SKB_RXCB(skb_beacon), rx_status, sizeof(*rx_status));
+		morse_mac_rx_status(mors, hdr_rx_status, &rx_status, skb_beacon);
+		memcpy(IEEE80211_SKB_RXCB(skb_beacon), &rx_status, sizeof(rx_status));
 
-		if (skb_beacon->len + skb_tailroom(skb_beacon) < length_11n) {
+		if (skb_beacon->len + skb_tailroom(skb_beacon) < bcn_length_11n) {
 			struct sk_buff *skb2;
 
 			skb2 = skb_copy_expand(skb_beacon, skb_headroom(skb_beacon),
-					       length_11n - skb_beacon->len, GFP_KERNEL);
+					       bcn_length_11n - skb_beacon->len,
+					       GFP_KERNEL);
 			morse_mac_skb_free(mors, skb_beacon);
 			skb_beacon = skb2;
 			if (!skb_beacon)
 				return -ENOMEM;
 		}
-		morse_dot11ah_s1g_to_11n_rx_packet(vif, skb_beacon, length_11n, ies_mask);
+		morse_dot11ah_s1g_to_11n_rx_packet(vif, skb_beacon, bcn_length_11n, ies_mask);
 
 		if (skb_beacon->len > 0)
 			ieee80211_rx_irqsafe(hw, skb_beacon);

@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <linux/interrupt.h>
@@ -402,7 +390,10 @@ static void morse_beacon_tasklet(unsigned long data)
 
 	spin_unlock_bh(&mors_vif->vendor_ie.lock);
 
-	mors_vif->dtim_count = (mors_vif->dtim_count + 1) % vif->bss_conf.dtim_period;
+	if (vif->bss_conf.dtim_period)
+		mors_vif->dtim_count = (mors_vif->dtim_count + 1) % vif->bss_conf.dtim_period;
+	else
+		mors_vif->dtim_count = 0;
 
 	if (beacon->len >= DOT11AH_1MHZ_MCS0_MAX_BEACON_LENGTH &&
 	    mors_vif->custom_configs->channel_info.pri_bw_mhz == 1) {

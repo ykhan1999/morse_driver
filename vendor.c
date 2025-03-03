@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <net/mac80211.h>
@@ -207,6 +195,8 @@ void morse_vendor_insert_caps_ops_ie(struct morse *mors,
 	if (mors_vif->page_slicing_info.enabled)
 		ie_data.cap0 |= MORSE_VENDOR_IE_CAP0_PAGE_SLICING_EXCLUSIVE_SUPPORT;
 
+	ie_data.ops0 |= BMSET(mors->rc_method, MORSE_VENDOR_IE_OPS0_RATE_CONTROL);
+
 	if (vif->type == NL80211_IFTYPE_AP) {
 		/* Always indicate usage of DTIM CTS-to-self */
 		if (MORSE_OPS_IN_USE(&mors_vif->operations, DTIM_CTS_TO_SELF))
@@ -214,6 +204,8 @@ void morse_vendor_insert_caps_ops_ie(struct morse *mors,
 
 		/* See if we need to negotiate LEGACY AMSDU for sta */
 		if (is_assoc_reassoc_resp) {
+			/* Must be held while finding and dereferencing sta */
+			rcu_read_lock();
 			sta = ieee80211_find_sta(vif, mgmt->da);
 			if (sta)
 				mors_sta = (struct morse_sta *)sta->drv_priv;
@@ -229,6 +221,7 @@ void morse_vendor_insert_caps_ops_ie(struct morse *mors,
 								LEGACY_AMSDU);
 				}
 			}
+			rcu_read_unlock();
 		}
 	} else if (vif->type == NL80211_IFTYPE_STATION) {
 		if (is_assoc_reassoc_req) {
@@ -276,6 +269,8 @@ void morse_vendor_rx_caps_ops_ie(struct morse_vif *mors_vif,
 
 	if ((vif->type == NL80211_IFTYPE_AP && is_assoc_reassoc_req) ||
 	    (ieee80211_vif_is_mesh(vif) && is_mesh_open_frame)) {
+		/* Must be held while finding and dereferencing sta */
+		rcu_read_lock();
 		sta = ieee80211_find_sta(vif, mgmt->sa);
 		if (sta) {
 			mors_sta = (struct morse_sta *)sta->drv_priv;
@@ -288,7 +283,9 @@ void morse_vendor_rx_caps_ops_ie(struct morse_vif *mors_vif,
 			mors_sta->vendor_info.sw_ver.minor = ie->sw_ver.minor;
 			mors_sta->vendor_info.sw_ver.patch = ie->sw_ver.patch;
 			mors_sta->vendor_info.morse_mmss_offset =
-			    MORSE_VENDOR_IE_CAP0_GET_MMSS_OFFSET(ie->cap0);
+				MORSE_VENDOR_IE_CAP0_GET_MMSS_OFFSET(ie->cap0);
+			mors_sta->vendor_info.rc_method = BMGET(ie->ops0,
+								MORSE_VENDOR_IE_OPS0_RATE_CONTROL);
 
 			if ((ie->ops0 & MORSE_VENDOR_IE_OPS0_LEGACY_AMSDU) &&
 			    mors->custom_configs.enable_legacy_amsdu)
@@ -302,6 +299,7 @@ void morse_vendor_rx_caps_ops_ie(struct morse_vif *mors_vif,
 			mors_sta->vendor_info.pv1_data_frame_only_support =
 				(ie->cap0 & MORSE_VENDOR_IE_CAP0_PV1_DATA_FRAME_SUPPORT);
 		}
+		rcu_read_unlock();
 	} else if (vif->type == NL80211_IFTYPE_STATION && is_assoc_reassoc_resp) {
 		memset(&mors_vif->bss_vendor_info, 0, sizeof(mors_vif->bss_vendor_info));
 		mors_vif->bss_vendor_info.valid = true;
@@ -310,7 +308,9 @@ void morse_vendor_rx_caps_ops_ie(struct morse_vif *mors_vif,
 		mors_vif->bss_vendor_info.sw_ver.minor = ie->sw_ver.minor;
 		mors_vif->bss_vendor_info.sw_ver.patch = ie->sw_ver.patch;
 		mors_vif->bss_vendor_info.morse_mmss_offset =
-		    MORSE_VENDOR_IE_CAP0_GET_MMSS_OFFSET(ie->cap0);
+			MORSE_VENDOR_IE_CAP0_GET_MMSS_OFFSET(ie->cap0);
+		mors_vif->bss_vendor_info.rc_method = BMGET(ie->ops0,
+							    MORSE_VENDOR_IE_OPS0_RATE_CONTROL);
 
 		if (ie->ops0 & MORSE_VENDOR_IE_OPS0_DTIM_CTS_TO_SELF)
 			MORSE_OPS_SET(&mors_vif->bss_vendor_info.operations, DTIM_CTS_TO_SELF);
@@ -368,7 +368,7 @@ int morse_vendor_get_ie_len_for_pkt(struct sk_buff *pkt, int oui_type)
 }
 
 int morse_vendor_send_bcn_vendor_ie_found_event(struct ieee80211_vif *vif,
-						struct ieee80211_vendor_ie *vie)
+						const struct ieee80211_vendor_ie *vie)
 {
 	struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);
 	struct sk_buff *skb;
@@ -389,8 +389,8 @@ int morse_vendor_send_bcn_vendor_ie_found_event(struct ieee80211_vif *vif,
 	return 0;
 }
 
-int morse_vendor_send_mgmt_vendor_ie_found_event(struct ieee80211_vif *vif,
-						 u16 frame_type, struct ieee80211_vendor_ie *vie)
+int morse_vendor_send_mgmt_vendor_ie_found_event(struct ieee80211_vif *vif, u16 frame_type,
+						 const struct ieee80211_vendor_ie *vie)
 {
 	struct wireless_dev *wdev = ieee80211_vif_to_wdev(vif);
 	struct sk_buff *skb;

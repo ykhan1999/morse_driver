@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <linux/skbuff.h>
@@ -64,7 +52,10 @@
 #define TWT_MAX_AGREEMENT_LEN	(20)
 
 /** Flags of MORSE STA */
-#define MORSE_STA_FLAG_S1G_PV1   BIT(0)
+#define MORSE_STA_FLAG_S1G_PV1		BIT(0)
+
+/** CAC rule max */
+#define CAC_CFG_CHANGE_RULE_MAX		(8)
 
 struct morse_twt_agreement_data;
 
@@ -125,6 +116,8 @@ enum morse_commands_id {
 	MORSE_COMMAND_PV1_SET_RX_AMPDU_STATE = 0x0042,
 	MORSE_COMMAND_CONFIGURE_PAGE_SLICING = 0x0043,
 	MORSE_COMMAND_HW_SCAN = 0x0044,
+	MORSE_COMMAND_FORCE_POWER_MODE = 0x00048,
+	MORSE_COMMAND_SET_LI_SLEEP = 0x0049,
 
 
 	/* Temporary Commands that may be removed later */
@@ -151,7 +144,7 @@ enum morse_commands_id {
 	MORSE_COMMAND_GET_AVAILABLE_CHANNELS = 0xA011,
 	MORSE_COMMAND_SET_ECSA_S1G_INFO = 0xA012,
 	MORSE_COMMAND_GET_HW_VERSION = 0xA013,
-	MORSE_COMMAND_CAC_SET = 0xA014,
+	MORSE_COMMAND_CAC = 0xA014,
 	MORSE_COMMAND_DRIVER_SET_DUTY_CYCLE = 0xA015,
 	MORSE_COMMAND_MBSSID_INFO = 0xA016,
 	MORSE_COMMAND_OCS_REQ = 0xA017,
@@ -192,6 +185,7 @@ enum morse_cmd_return_code {
 	MORSE_RET_SUCCESS	  = 0,
 	MORSE_RET_EPERM		  = -1,
 	MORSE_RET_ENOMEM	  = -12,
+	MORSE_RET_CMD_NOT_HANDLED = -32757,
 };
 
 /* Crypto Related types */
@@ -721,9 +715,31 @@ struct morse_cmd_raw_cfg {
 	u8 variable[];
 } __packed;
 
-struct morse_cmd_cac {
+/** CAC threshold change rule */
+struct cac_cmd_change_rule {
+	/* Threshold in Authentication Request Frames per Second */
+	u16 arfs;
+	/** Percentage change to apply to threshold if condition is matched */
+	s16 threshold_change;
+} __packed;
+
+struct morse_cmd_cac_req {
 	struct morse_cmd_header hdr;
+	/** CAC subcommand */
 	u8 cmd;
+	/** Number of threshold change rules */
+	u8 rule_tot;
+	/** Threshold change rule (%) */
+	struct cac_cmd_change_rule rule[CAC_CFG_CHANGE_RULE_MAX];
+} __packed;
+
+struct morse_cmd_cac_cfm {
+	struct morse_cmd_header hdr;
+	__le32 status;
+	/** Number of threshold change rules */
+	u8 rule_tot;
+	/** Threshold change rule (%) */
+	struct cac_cmd_change_rule rule[CAC_CFG_CHANGE_RULE_MAX];
 } __packed;
 
 struct morse_cmd_mbssid {
@@ -926,6 +942,13 @@ enum morse_standby_mode_cmd {
 	STANDBY_MODE_CMD_SET_STATUS_PAYLOAD,
 };
 
+struct morse_cmd_standby_mode_exit {
+	/** Reason for exiting Standby mode, see @ref morse_standby_mode_exit_reason */
+	u8 reason;
+	/** Connection state of STA in LMAC to be synced with mac80211 */
+	u8 sta_state;
+};
+
 struct morse_cmd_standby_set_config {
 	/** Interval for transmitting Standby status packets */
 	__le32 notify_period_s;
@@ -962,9 +985,20 @@ struct morse_cmd_standby_set_status_payload {
 /**
  * Structure for Configuring MM standby mode
  */
+struct morse_cmd_standby_mode_resp {
+	struct morse_cmd_header hdr;
+	/** Standby Mode subcommands, see @ref morse_standby_mode_cmd */
+	__le32 status;
+	union {
+		u8 opaque[0];
+		/** Standby mode exit status */
+		struct morse_cmd_standby_mode_exit info;
+	};
+} __packed;
+
 struct morse_cmd_standby_mode_req {
 	struct morse_cmd_header hdr;
-	/** Standby Mode subcommands, see @ref standby_mode_commands_t */
+	/** Standby Mode subcommands, see @ref morse_standby_mode_cmd */
 	__le32 cmd;
 	union {
 		/** Valid for STANDBY_MODE_CMD_SET_CONFIG cmd */
@@ -976,6 +1010,9 @@ struct morse_cmd_standby_mode_req {
 	};
 } __packed;
 
+/* morse_standby_mode_exit_reason must be in sync with the reason code table
+ * in firmware, @ref standby_mode_exit_reason_t.
+ */
 enum morse_standby_mode_exit_reason {
 	/** No specific reason for exiting standby mode */
 	STANDBY_MODE_EXIT_REASON_NONE,
@@ -983,6 +1020,12 @@ enum morse_standby_mode_exit_reason {
 	STANDBY_MODE_EXIT_REASON_WAKEUP_FRAME,
 	/** The STA needs to associate */
 	STANDBY_MODE_EXIT_REASON_ASSOCIATE,
+	/** The STAs external input pin has fired */
+	STANDBY_MODE_EXIT_REASON_EXT_INPUT,
+	/** Whitelisted packet received */
+	STANDBY_MODE_EXIT_REASON_WHITELIST_PKT,
+	/** TCP connection lost */
+	STANDBY_MODE_EXIT_REASON_TCP_CONNECTION_LOST,
 };
 
 enum dhcp_offload_opcode {
@@ -1244,6 +1287,13 @@ struct morse_cmd_cfg_mesh {
 	u16 tbtt_adj_timer_interval_ms;
 } __packed;
 
+enum morse_cmd_host_tx_blocked_flags {
+	/** Block TX channel for all data and management frames */
+	MORSE_CMD_HOST_BLOCK_TX_FRAMES	= BIT(0),
+	/** Block TX channel for commands */
+	MORSE_CMD_HOST_BLOCK_TX_CMD	= BIT(1),
+};
+
 enum morse_param_action {
 	MORSE_PARAM_ACTION_SET = 0,
 	MORSE_PARAM_ACTION_GET = 1,
@@ -1253,8 +1303,9 @@ enum morse_param_action {
 };
 
 enum morse_param_id {
-	MORSE_PARAM_ID_MAX_TRAFFIC_DELIVERY_WAIT_US = 0,
-	MORSE_PARAM_ID_EXTRA_ACK_TIMEOUT_ADJUST_US = 1,
+	MORSE_PARAM_ID_MAX_TRAFFIC_DELIVERY_WAIT_US	= 0,
+	MORSE_PARAM_ID_EXTRA_ACK_TIMEOUT_ADJUST_US	= 1,
+	MORSE_PARAM_ID_HOST_TX_BLOCK = 15,
 
 	MORSE_PARAM_ID_LAST,
 	MORSE_PARAM_ID_MAX = __UINT32_MAX__,
@@ -1272,6 +1323,24 @@ struct morse_cmd_page_slicing_config {
 	struct morse_cmd_header hdr;
 	/** Page slicing enabled or disabled */
 	u8 enabled;
+} __packed;
+
+enum power_mode {
+	POWER_MODE_SNOOZE,
+	POWER_MODE_DEEP_SLEEP,
+	POWER_MODE_HIBERNATE,
+};
+
+struct morse_cmd_force_power_mode {
+	struct morse_cmd_header hdr;
+	/** Mode of power to force see @ref power_mode */
+	u32 mode;
+} __packed;
+
+struct morse_cmd_li_sleep {
+	struct morse_cmd_header hdr;
+	/** Listen interval value if enabled */
+	__le32 listen_interval;
 } __packed;
 
 struct morse_cmd_param_req {
@@ -1339,6 +1408,7 @@ int morse_cmd_arp_offload_update_ip_table(struct morse *mors, u16 vif_id,
 					  int arp_addr_count, u32 *arp_addr_list);
 int morse_cmd_get_capabilities(struct morse *mors,
 			       u16 vif_id, struct morse_caps *capabilities);
+int morse_cmd_enable_li_sleep(struct morse *mors,  u16 listen_interval, u16 vif_id);
 int morse_cmd_dhcpc_enable(struct morse *mors, u16 vif_id);
 int morse_cmd_twt_agreement_validate_req(struct morse *mors,
 					 struct morse_twt_agreement_data *agreement, u16 iface_id);

@@ -3,19 +3,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/types.h>
@@ -122,16 +110,13 @@ struct sk_buff *morse_mac_get_mbssid_beacon_ies(struct morse_vif *mors_vif);
  * @ies_mask:       IE mask pointer
  * @vif:            Valid STA vif
  * @hdr_rx_status:  morse RX status buffer
- * @rx_status:      ieee80211 rx status
- * @length_11n:     Beacon len after 11n conversion
  *
  * Return:  0 on success
  */
 int morse_process_beacon_from_mbssid_ie(struct morse *mors, struct sk_buff *skb,
 					struct dot11ah_ies_mask *ies_mask,
 					struct ieee80211_vif *vif,
-					struct morse_skb_rx_status *hdr_rx_status,
-					struct ieee80211_rx_status *rx_status, int length_11n);
+					const struct morse_skb_rx_status *hdr_rx_status);
 
 /**
  * morse_command_process_bssid_info - Process morsectrl command coming from hostapd to decide

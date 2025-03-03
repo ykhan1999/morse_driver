@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -131,6 +119,9 @@
 /*
  * TWT definitions.
  */
+#define WLAN_CATEGORY_S1G_UNPROTECTED  (22)
+#define WLAN_CATEGORY_S1G_PROTECTED    (23)
+
 #if KERNEL_VERSION(5, 15, 0) > MAC80211_VERSION_CODE
 #define WLAN_EID_S1G_TWT				(216)
 
@@ -175,7 +166,29 @@ struct ieee80211_twt_setup {
 	u8 control;
 	u8 params[];
 } __packed;
+
+enum ieee80211_s1g_actioncode {
+	WLAN_S1G_AID_SWITCH_REQUEST = 0,
+	WLAN_S1G_AID_SWITCH_RESPONSE = 1,
+	WLAN_S1G_SYNC_CONTROL = 2,
+	WLAN_S1G_STA_INFO_ANNOUNCE = 3,
+	WLAN_S1G_EDCA_PARAM_SET = 4,
+	WLAN_S1G_EL_OPERATION = 5,
+	WLAN_S1G_TWT_SETUP = 6,
+	WLAN_S1G_TWT_TEARDOWN = 7,
+	WLAN_S1G_SECT_GROUP_ID_LIST = 8,
+	WLAN_S1G_SECT_ID_FEEDBACK = 9,
+	WLAN_S1G_TWT_INFORMATION = 11,
+};
+
 #endif
+
+enum ieee80211_s1g_protected_actioncode {
+	WLAN_S1G_HEADER_COMPRESSION = 3,
+	WLAN_S1G_PROTECTED_TWT_SETUP,
+	WLAN_S1G_PROTECTED_TWT_TEARDOWN,
+	WLAN_S1G_PROTECTED_TWT_INFORMATION = 11,
+};
 
 #define IEEE80211_TWT_CONTROL_NEG_TYPE			BIT(2)
 #define IEEE80211_TWT_REQTYPE_SETUP_CMD_OFFSET		(1)
@@ -668,13 +681,15 @@ struct morse_dot11ah_cssid_item *morse_dot11ah_find_bssid(u8 bssid[ETH_ALEN]);
  * @s1g_ies: S1G information elements to store.
  * @s1g_ies_len: length of the S1G information elements.
  * @bssid: identifier of the BSS network.
+ * @vals: pointer to the values to be updated in a beacon, NULL for other frames.
  *
  * Stores BSS information and S1G IEs for each BSS network, if its not already
  * stored. Each stored item is found by searching the integer value of BSSID,
  * which is expectd to be always non-NULL
  */
 void morse_dot11ah_store_cssid(struct dot11ah_ies_mask *ies_mask, u16 capab_info, u8 *s1g_ies,
-			      int s1g_ies_len, const u8 *bssid);
+			       int s1g_ies_len, const u8 *bssid,
+			       struct dot11ah_update_rx_beacon_vals *vals);
 
 int morse_dot11ah_parse_ies(u8 *start, size_t len, struct dot11ah_ies_mask *ies_mask);
 
@@ -710,6 +725,8 @@ const u8 *morse_dot11_find_ie(u8 eid, const u8 *ies, int length);
 u8 *morse_dot11_insert_ie(u8 *dst, const u8 *src, u8 eid, u8 len);
 
 u8 *morse_dot11_insert_ie_no_header(u8 *dst, const u8 *src, u8 len);
+u8 *morse_dot11_insert_rsn_and_rsnx_ie(u8 *pos, struct dot11ah_update_rx_beacon_vals *vals,
+		const struct dot11ah_ies_mask *ies_mask);
 
 /**
  * morse_dot11_clear_eid_from_ies_mask() - Free/clear EID entry from ies_mask.

@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -539,11 +527,16 @@ static int morse_firmware_read_ext_host_table(struct morse *mors,
 	/* Round up to the nearest word, as dm reads must be multiples of word size */
 	ext_host_tbl_len = ROUND_BYTES_TO_WORD(ext_host_tbl_len);
 
+	if (WARN_ON(ext_host_tbl_len > INT_MAX)) {
+		ret = -EINVAL;
+		goto exit;
+	}
+
 	host_tbl = kmalloc(ext_host_tbl_len, GFP_KERNEL);
 	if (!host_tbl)
 		goto exit;
 
-	ret = morse_dm_read(mors, ext_host_tbl_ptr, (u8 *)host_tbl, ext_host_tbl_len);
+	ret = morse_dm_read(mors, ext_host_tbl_ptr, (u8 *)host_tbl, (int)ext_host_tbl_len);
 
 	morse_release_bus(mors);
 

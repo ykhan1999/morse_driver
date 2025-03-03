@@ -1,19 +1,7 @@
 /*
  * Copyright 2022-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -280,6 +268,7 @@ int morse_rc_sta_add(struct morse *mors, struct ieee80211_vif *vif, struct ieee8
 	struct mmrc_sta_capabilities caps;
 	int oper_bw_mhz = mors->custom_configs.channel_info.op_bw_mhz;
 	size_t table_mem_size;
+	struct mmrc_table *tb;
 
 	memset(&caps, 0, sizeof(caps));
 
@@ -329,19 +318,20 @@ int morse_rc_sta_add(struct morse *mors, struct ieee80211_vif *vif, struct ieee8
 		caps.max_retries = MMRC_MAX_CHAIN_ATTEMPTS;
 
 	MORSE_WARN_ON(FEATURE_ID_RATECONTROL, msta->rc.tb);
-	kfree(msta->rc.tb);
 	table_mem_size = mmrc_memory_required_for_caps(&caps);
 	MORSE_RC_DBG(mors, "%s: Mem for table: %zd", __func__, table_mem_size);
-	msta->rc.tb = kzalloc(table_mem_size, GFP_KERNEL);
+	tb = kzalloc(table_mem_size, GFP_KERNEL);
 
-	/* Initialise the STA in MMRC */
-	mmrc_sta_init(msta->rc.tb, &caps, msta->avg_rssi);
-
-	/* Set last update time */
-	msta->rc.last_update = jiffies;
+	/* Initialise the STA rate control table */
+	mmrc_sta_init(tb, &caps, msta->avg_rssi);
 
 	spin_lock_bh(&mors->mrc.lock);
+
+	kfree(msta->rc.tb);
+	msta->rc.tb = tb;
 	list_add(&msta->rc.list, &mors->mrc.stas);
+	msta->rc.last_update = jiffies;
+
 	spin_unlock_bh(&mors->mrc.lock);
 
 	return 0;
@@ -352,6 +342,9 @@ void morse_rc_reinit_stas(struct morse *mors, struct ieee80211_vif *vif)
 	struct list_head *pos;
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	struct list_head *morse_sta_list = &mors_vif->ap->stas;
+
+	/* Must be held while finding and dereferencing sta pointers */
+	rcu_read_lock();
 
 	MORSE_RC_INFO(mors, "%s: no_of_stations=%d\n", __func__, mors_vif->ap->num_stas);
 	list_for_each(pos, morse_sta_list) {
@@ -377,6 +370,8 @@ void morse_rc_reinit_stas(struct morse *mors, struct ieee80211_vif *vif)
 			morse_rc_set_fixed_rate(mors, sta, fixed_mcs, fixed_bw, fixed_ss,
 						fixed_guard);
 	}
+
+	rcu_read_unlock();
 }
 
 bool _morse_rc_set_fixed_rate(struct morse *mors,
@@ -421,18 +416,17 @@ void morse_rc_sta_remove(struct morse *mors, struct ieee80211_sta *sta)
 {
 	struct morse_sta *msta = (struct morse_sta *)sta->drv_priv;
 
-	if (!msta->rc.tb)
-		return;
-
 	spin_lock_bh(&mors->mrc.lock);
-	kfree(msta->rc.tb);
-	msta->rc.tb = NULL;
-	list_del_init(&msta->rc.list);
+	if (msta->rc.tb) {
+		list_del_init(&msta->rc.list);
+		kfree(msta->rc.tb);
+		msta->rc.tb = NULL;
+	}
 	spin_unlock_bh(&mors->mrc.lock);
 }
 
-static void morse_rc_sta_fill_basic_rates(struct morse *mors,
-					  struct morse_skb_tx_info *tx_info, int tx_bw)
+static void morse_rc_sta_fill_basic_rates(struct morse_skb_tx_info *tx_info,
+					  struct ieee80211_tx_info *info, int tx_bw)
 {
 	int i;
 	enum dot11_bandwidth bw_idx = morse_ratecode_bw_mhz_to_bw_index(tx_bw);
@@ -448,6 +442,11 @@ static void morse_rc_sta_fill_basic_rates(struct morse *mors,
 
 	for (i = 1; i < IEEE80211_TX_MAX_RATES; i++)
 		tx_info->rates[i].count = 0;
+
+	info->control.rates[0].idx = 0;
+	info->control.rates[0].count = tx_info->rates[0].count;
+	info->control.rates[0].flags = 0;
+	info->control.rates[1].idx = -1;
 }
 
 static int morse_rc_sta_get_rates(struct morse *mors,
@@ -472,6 +471,56 @@ static int morse_rc_sta_get_rates(struct morse *mors,
 	return ret;
 }
 
+void morse_rc_vif_update_mcast_rate(struct morse *mors, struct morse_vif *mors_vif)
+{
+	struct list_head *pos;
+	struct list_head *morse_sta_list = &mors_vif->ap->stas;
+	u32 best_rate_throughput = 0;
+	u32 mcast_throughput = 0;
+	struct mmrc_rate best_rate;
+
+	if (!mors_vif->ap->num_stas) {
+		/* If there are no STAs connected, reset the throughput to use basic rates
+		 * for multicast traffic.
+		 */
+		mors_vif->mcast_tx_rate_throughput = 0;
+		return;
+	}
+
+	/* Iterate through the STAs connected and find the lowest rate used */
+	list_for_each(pos, morse_sta_list) {
+		struct morse_sta *msta = list_entry(pos, struct morse_sta, list);
+
+		if (!msta)
+			continue;
+
+		best_rate = mmrc_sta_get_best_rate(msta->rc.tb);
+		best_rate_throughput = mmrc_calculate_theoretical_throughput(best_rate);
+		if (!mcast_throughput || mcast_throughput > best_rate_throughput) {
+			mcast_throughput = best_rate_throughput;
+			mors_vif->mcast_tx_rate_throughput = mcast_throughput;
+			mors_vif->mcast_tx_rate = best_rate;
+		}
+	}
+}
+
+static bool morse_rc_use_basic_rates(struct ieee80211_sta *sta, struct sk_buff *skb,
+				     struct ieee80211_hdr *hdr)
+{
+	if (!sta)
+		return true;
+
+	if (!ieee80211_is_data_qos(hdr->frame_control) &&
+		     !morse_dot11ah_is_pv1_qos_data(hdr->frame_control))
+		return true;
+
+	/* Use basic rates for EAPOL exchanges */
+	if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE)))
+		return true;
+
+	return false;
+}
+
 void morse_rc_sta_fill_tx_rates(struct morse *mors,
 				struct morse_skb_tx_info *tx_info,
 				struct sk_buff *skb,
@@ -482,6 +531,9 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 	struct morse_sta *msta;
 	struct mmrc_rate_table rates;
 	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
+	struct ieee80211_vif *vif = info->control.vif;
+	u8 *da = ieee80211_get_DA(hdr);
+	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 
 	/* Check if we can use MMRC and MORSE rate code BW index interchangeably */
 	BUILD_BUG_ON((MMRC_BW_1MHZ != (enum mmrc_bw)DOT11_BANDWIDTH_1MHZ ||
@@ -489,28 +541,42 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 		      MMRC_BW_4MHZ != (enum mmrc_bw)DOT11_BANDWIDTH_4MHZ ||
 		      MMRC_BW_16MHZ != (enum mmrc_bw)DOT11_BANDWIDTH_16MHZ));
 
-	morse_rc_sta_fill_basic_rates(mors, tx_info, tx_bw);
+	memset(&info->control.rates, 0, sizeof(info->control.rates));
+	memset(&info->status.rates, 0, sizeof(info->status.rates));
+	morse_rc_sta_fill_basic_rates(tx_info, info, tx_bw);
+
+	if ((is_broadcast_ether_addr(da) || is_multicast_ether_addr(da)) &&
+	    mors_vif->enable_multicast_rate_control &&
+	    mors_vif->mcast_tx_rate_throughput) {
+		enum dot11_bandwidth bw_idx = (enum dot11_bandwidth)mors_vif->mcast_tx_rate.bw;
+
+		morse_ratecode_mcs_index_set(&tx_info->rates[0].morse_ratecode,
+					mors_vif->mcast_tx_rate.rate);
+		morse_ratecode_bw_index_set(&tx_info->rates[0].morse_ratecode, bw_idx);
+		if (bw_idx == DOT11_BANDWIDTH_1MHZ)
+			morse_ratecode_preamble_set(&tx_info->rates[0].morse_ratecode,
+				MORSE_RATE_PREAMBLE_S1G_1M);
+		if (mors_vif->mcast_tx_rate.guard == MMRC_GUARD_SHORT)
+			morse_ratecode_enable_sgi(&tx_info->rates[0].morse_ratecode);
+
+		/* Set the rate count */
+		tx_info->rates[0].count = 1;
+		info->control.rates[0].count = tx_info->rates[0].count;
+		return;
+	}
 
 	/* Use basic rates for non data packets */
-	if (!sta || (!ieee80211_is_data_qos(hdr->frame_control) &&
-		     !morse_dot11ah_is_pv1_qos_data(hdr->frame_control)))
+	if (morse_rc_use_basic_rates(sta, skb, hdr))
 		return;
 
 	msta = (struct morse_sta *)sta->drv_priv;
 	if (!msta)
 		return;
 
-	/* Use basic rates for initial EAPOL exchange when rate control has not yet converged */
-	if (unlikely(skb->protocol == cpu_to_be16(ETH_P_PAE)))
-		return;
-
 	ret = morse_rc_sta_get_rates(mors, msta, &rates, skb->len);
 
-	/* If station not found, go for basic rates */
-	if (ret < 0)
-		return;
-
 	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
+		info->control.rates[i].flags = 0;
 		if (rates.rates[i].rate != MMRC_MCS_UNUSED) {
 			u8 mcs = rates.rates[i].rate;
 			u8 nss_index = rates.rates[i].ss;
@@ -525,21 +591,22 @@ void morse_rc_sta_fill_tx_rates(struct morse *mors,
 			morse_ratecode_preamble_set(&tx_info->rates[i].morse_ratecode, pream);
 			tx_info->rates[i].count = rates.rates[i].attempts;
 
-			if (rts_allowed && (rates.rates[i].flags & BIT(MMRC_FLAGS_CTS_RTS)))
+			if (rts_allowed && (rates.rates[i].flags & BIT(MMRC_FLAGS_CTS_RTS))) {
 				morse_ratecode_enable_rts(&tx_info->rates[i].morse_ratecode);
+				info->control.rates[i].flags |= IEEE80211_TX_RC_USE_RTS_CTS;
+			}
 
-			if (rates.rates[i].guard == MMRC_GUARD_SHORT)
+			if (rates.rates[i].guard == MMRC_GUARD_SHORT) {
 				morse_ratecode_enable_sgi(&tx_info->rates[i].morse_ratecode);
+				info->control.rates[i].flags |= IEEE80211_TX_RC_SHORT_GI;
+			}
 
 			/* Update skb tx_info */
 			info->control.rates[i].idx = rates.rates[i].rate;
 			info->control.rates[i].count = rates.rates[i].attempts;
-			/* FIXME: Need to a better way to pass information around */
-			info->control.rates[i].flags = tx_info->rates[i].morse_ratecode;
 		} else {
-			info->control.rates[i].idx = MMRC_MCS_UNUSED;
+			info->control.rates[i].idx = -1;
 			info->control.rates[i].count = 0;
-			info->control.rates[i].flags = 0;
 			tx_info->rates[i].count = 0;
 		}
 	}
@@ -598,8 +665,9 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 	struct morse_sta *msta = NULL;
 	struct ieee80211_vif *vif = NULL;
 	u32 agg_success, agg_packets;
+	struct morse_vif *mors_vif;
 
-	/* Need the RCU lock to find a station, and must hold it until we're done with sta */
+	/* Must be held while finding and dereferencing sta */
 	rcu_read_lock();
 
 	vif = txi->control.vif ? txi->control.vif : morse_get_vif_from_tx_status(mors, tx_sts);
@@ -609,23 +677,22 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 	else
 		sta = ieee80211_find_sta(vif, hdr->addr1);
 
-	if (!sta)
+	/* Don't update rate info if basic rates were used */
+	if (morse_rc_use_basic_rates(sta, skb, hdr))
 		goto exit;
 
 	msta = (struct morse_sta *)sta->drv_priv;
-
-	if (!msta ||
-		(!ieee80211_is_data_qos(hdr->frame_control) &&
-			!morse_dot11ah_is_pv1_qos_data(hdr->frame_control)))
-		/* use basic rates for non-data packets */
+	if (!msta)
 		goto exit;
+
+	mors_vif = ieee80211_vif_to_morse_vif(vif);
 
 	attempts = morse_rc_sta_get_attempts(mors, tx_sts);
 	if (attempts <= 0)
 		/* Did we really send the packet? */
 		goto exit;
 
-	/* Update mmrc rates struct from ieee80211_tx_info feedback */
+	/* Update mmrc rates struct from tx status feedback from the firmware */
 	for (i = 0; i < count; i++) {
 		rates.rates[i].rate = morse_ratecode_mcs_index_get(tx_sts->rates[i].morse_ratecode);
 		rates.rates[i].ss = morse_ratecode_nss_index_get(tx_sts->rates[i].morse_ratecode);
@@ -636,11 +703,26 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 	}
 
 	if (msta) {
-		/* Save the rate information. This will used to update stations tx rate stats */
+		/* Save the rate information. This will be used to update station's tx rate stats */
 		msta->last_sta_tx_rate.bw = rates.rates[0].bw;
 		msta->last_sta_tx_rate.rate = rates.rates[0].rate;
 		msta->last_sta_tx_rate.ss = rates.rates[0].ss;
 		msta->last_sta_tx_rate.guard = rates.rates[0].guard;
+
+		/* Check if the new rate is lowest rate used */
+		if (mors_vif->enable_multicast_rate_control) {
+			u32 best_rate_tp;
+			struct mmrc_rate best_rate;
+
+			best_rate = mmrc_sta_get_best_rate(msta->rc.tb);
+			best_rate_tp = mmrc_calculate_theoretical_throughput(best_rate);
+
+			if (!mors_vif->mcast_tx_rate_throughput ||
+			    mors_vif->mcast_tx_rate_throughput > best_rate_tp) {
+				mors_vif->mcast_tx_rate_throughput = best_rate_tp;
+				mors_vif->mcast_tx_rate = best_rate;
+			}
+		}
 	}
 
 	if (tx_sts->ampdu_info) {
@@ -654,40 +736,35 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 
 exit:
 	ieee80211_tx_info_clear_status(txi);
-	if (tx_sts) {
-		if (!(tx_sts->flags & MORSE_TX_STATUS_FLAGS_NO_ACK) &&
-		    !(txi->flags & IEEE80211_TX_CTL_NO_ACK))
-			txi->flags |= IEEE80211_TX_STAT_ACK;
 
-		if (tx_sts->flags & MORSE_TX_STATUS_FLAGS_PS_FILTERED) {
-			mors->debug.page_stats.tx_ps_filtered++;
-			txi->flags |= IEEE80211_TX_STAT_TX_FILTERED;
+	if (!(tx_sts->flags & MORSE_TX_STATUS_FLAGS_NO_ACK) &&
+	    !(txi->flags & IEEE80211_TX_CTL_NO_ACK))
+		txi->flags |= IEEE80211_TX_STAT_ACK;
 
-			/* Clear TX CTL AMPDU flag so that this frame gets rescheduled in
-			 * ieee80211_handle_filtered_frame(). This flag will get set
-			 * again by mac80211's tx path on rescheduling.
-			 */
-			txi->flags &= ~IEEE80211_TX_CTL_AMPDU;
-			if (msta) {
-				if (!msta->tx_ps_filter_en)
-					MORSE_RC_DBG(mors, "TX ps filter set sta[%pM]\n",
-						     msta->addr);
-				msta->tx_ps_filter_en = true;
-			}
+	if (tx_sts->flags & MORSE_TX_STATUS_FLAGS_PS_FILTERED) {
+		mors->debug.page_stats.tx_ps_filtered++;
+		txi->flags |= IEEE80211_TX_STAT_TX_FILTERED;
+
+		/* Clear TX CTL AMPDU flag so that this frame gets rescheduled in
+		 * ieee80211_handle_filtered_frame(). This flag will get set
+		 * again by mac80211's tx path on rescheduling.
+		 */
+		txi->flags &= ~IEEE80211_TX_CTL_AMPDU;
+		if (msta) {
+			if (!msta->tx_ps_filter_en)
+				MORSE_RC_DBG(mors, "TX ps filter set sta[%pM]\n",
+					     msta->addr);
+			msta->tx_ps_filter_en = true;
 		}
-
-		for (i = 0; i < count; i++) {
-			if (tx_sts->rates[i].count > 0)
-				r[i].count = tx_sts->rates[i].count;
-			else
-				r[i].idx = -1;
-		}
-	} else {
-		txi->control.rates[0].count = 1;
-		txi->control.rates[1].idx = -1;
-		if (!(txi->flags & IEEE80211_TX_CTL_NO_ACK))
-			txi->flags |= IEEE80211_TX_STAT_ACK;
 	}
+
+	for (i = 0; i < count; i++) {
+		if (tx_sts->rates[i].count > 0)
+			r[i].count = tx_sts->rates[i].count;
+		else
+			r[i].idx = -1;
+	}
+
 	/* single packet per A-MPDU (for now) */
 	if (txi->flags & IEEE80211_TX_CTL_AMPDU) {
 		txi->flags |= IEEE80211_TX_STAT_AMPDU;
@@ -714,6 +791,9 @@ void morse_rc_sta_state_check(struct morse *mors,
 
 	/* Add to Morse RC STA list */
 	if (old_state < new_state && new_state == IEEE80211_STA_ASSOC) {
+		struct mmrc_rate best_rate;
+		struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
+
 		/* Newly associated, add to RC */
 		morse_rc_sta_add(mors, vif, sta);
 
@@ -721,6 +801,22 @@ void morse_rc_sta_state_check(struct morse *mors,
 		if (enable_fixed_rate)
 			morse_rc_set_fixed_rate(mors, sta, fixed_mcs, fixed_bw, fixed_ss,
 						fixed_guard);
+
+		if (mors_vif->enable_multicast_rate_control) {
+			u32 best_tp;
+
+			/* Check if new STA supports multicast rate. If the new STA is the first one
+			 * to join the network then update vif multicast rate to STA's best rate.
+			 */
+			best_rate = mmrc_sta_get_best_rate(msta->rc.tb);
+			best_tp = mmrc_calculate_theoretical_throughput(best_rate);
+
+			if (mors_vif->mcast_tx_rate_throughput > best_tp ||
+			    !mors_vif->ap->num_stas) {
+				mors_vif->mcast_tx_rate_throughput = best_tp;
+				mors_vif->mcast_tx_rate = best_rate;
+			}
+		}
 	} else if (old_state > new_state &&
 		   (old_state == IEEE80211_STA_ASSOC || old_state == IEEE80211_STA_AUTH)) {
 		/* Lost or failed association; remove from list */

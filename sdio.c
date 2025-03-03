@@ -1,22 +1,11 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/workqueue.h>
@@ -62,6 +51,9 @@ module_param_string(sdio_clk_debugfs, sdio_clk_debugfs, sizeof(sdio_clk_debugfs)
 /* Slow down SDIO CLK to 150KHz. This is the lowest value we can set. */
 #define SLOW_SDIO_CLK_HZ 150000
 
+/* Value to indicate that the base address for bulk/register read/writes has yet to be set */
+#define MORSE_SDIO_BASE_ADDR_UNSET 0xFFFFFFFF
+
 /** Max pad size for an SKB. This must be kept in sync with the firmware.
  *  2 less than max alignment requirements, as mac80211 guarantees 2 byte alignment for skbs.
  *  Pager requires pages to have a word aligned length, so round up to nearest word.
@@ -98,6 +90,12 @@ static u32 morse_sdio_calculate_base_address(u32 address, u8 access)
 	return (address & MORSE_SDIO_RW_ADDR_BOUNDARY_MASK) | (access & 0x3);
 }
 
+static void morse_sdio_reset_base_address(struct morse_sdio *sdio)
+{
+	sdio->bulk_addr_base = MORSE_SDIO_BASE_ADDR_UNSET;
+	sdio->register_addr_base = MORSE_SDIO_BASE_ADDR_UNSET;
+}
+
 static int morse_sdio_set_func_address_base(struct morse_sdio *sdio,
 					    u32 address, u8 access, bool bulk)
 {
@@ -105,6 +103,7 @@ static int morse_sdio_set_func_address_base(struct morse_sdio *sdio,
 	u8 base[4];
 	u32 calculated_addr_base = morse_sdio_calculate_base_address(address, access);
 	u32 *current_addr_base = bulk ? &sdio->bulk_addr_base : &sdio->register_addr_base;
+	bool base_addr_is_unset = (*current_addr_base == MORSE_SDIO_BASE_ADDR_UNSET);
 	struct sdio_func *func2 = sdio->func;
 	struct sdio_func *func1 = sdio->func->card->sdio_func[0];
 	struct sdio_func *func_to_use = bulk ? func2 : func1;
@@ -112,7 +111,7 @@ static int morse_sdio_set_func_address_base(struct morse_sdio *sdio,
 	int retries = 0;
 	static const int max_retries = 3;
 
-	if ((*current_addr_base) == calculated_addr_base)
+	if ((*current_addr_base) == calculated_addr_base && !base_addr_is_unset)
 		return ret;
 
 	base[0] = (u8)((address & 0x00FF0000) >> 16);
@@ -121,7 +120,8 @@ static int morse_sdio_set_func_address_base(struct morse_sdio *sdio,
 
 retry:
 	/* Write them as single bytes for now */
-	if (base[0] != (u8)(((*current_addr_base) & 0x00FF0000) >> 16)) {
+	if (base_addr_is_unset ||
+	    (base[0] != (u8)(((*current_addr_base) & 0x00FF0000) >> 16))) {
 		sdio_writeb(func_to_use, base[0], MORSE_REG_ADDRESS_WINDOW_0, &ret);
 		if (mors->cfg->xtal_init_sdio_trans_delay_ms) {
 			msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
@@ -131,7 +131,8 @@ retry:
 			goto err;
 	}
 
-	if (base[1] != (u8)(((*current_addr_base) & 0xFF000000) >> 24)) {
+	if (base_addr_is_unset ||
+	    (base[1] != (u8)(((*current_addr_base) & 0xFF000000) >> 24))) {
 		sdio_writeb(func_to_use, base[1], MORSE_REG_ADDRESS_WINDOW_1, &ret);
 		if (mors->cfg->xtal_init_sdio_trans_delay_ms) {
 			msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
@@ -141,7 +142,8 @@ retry:
 			goto err;
 	}
 
-	if (base[2] != (u8)(((*current_addr_base) & 0x3))) {
+	if (base_addr_is_unset ||
+	    (base[2] != (u8)(((*current_addr_base) & 0x3)))) {
 		sdio_writeb(func_to_use, base[2], MORSE_REG_ADDRESS_CONFIG, &ret);
 		if (mors->cfg->xtal_init_sdio_trans_delay_ms) {
 			msleep(mors->cfg->xtal_init_sdio_trans_delay_ms);
@@ -175,6 +177,7 @@ err:
 		goto retry;
 	}
 
+	*current_addr_base = MORSE_SDIO_BASE_ADDR_UNSET;
 	MORSE_SDIO_ERR(mors, "%s %d\n", __func__, ret);
 	return ret;
 }
@@ -244,8 +247,7 @@ static int morse_sdio_regl_write(struct morse_sdio *sdio, u32 address, u32 value
 
 	if (original_address == MORSE_REG_RESET(mors) && value == MORSE_REG_RESET_VALUE(mors)) {
 		MORSE_SDIO_DBG(mors, "SDIO reset detected, invalidating base addr\n");
-		sdio->bulk_addr_base = 0x0;
-		sdio->register_addr_base = 0x0;
+		morse_sdio_reset_base_address(sdio);
 	}
 exit:
 	return (int)ret;
@@ -299,7 +301,7 @@ static int morse_sdio_mem_write(struct morse_sdio *sdio, u32 address, u8 *data, 
 
 	address &= 0x0000FFFF;	/* remove base and keep offset */
 	if (access == MORSE_CONFIG_ACCESS_4BYTE) {
-		if (unlikely(!is_aligned(data, mors->bus_ops->bulk_alignment))) {
+		if (unlikely(!IS_ALIGNED((uintptr_t)data, mors->bus_ops->bulk_alignment))) {
 			MORSE_ERR_RATELIMITED(mors, "Bulk write data is not aligned to %u bytes\n",
 					mors->bus_ops->bulk_alignment);
 			ret = -EBADE;
@@ -365,7 +367,7 @@ static int morse_sdio_mem_read(struct morse_sdio *sdio, u32 address, u8 *data, s
 
 	address &= 0x0000FFFF;	/* remove base and keep offset */
 	if (access == MORSE_CONFIG_ACCESS_4BYTE) {
-		if (unlikely(!is_aligned(data, mors->bus_ops->bulk_alignment))) {
+		if (unlikely(!IS_ALIGNED((uintptr_t)data, mors->bus_ops->bulk_alignment))) {
 			MORSE_ERR_RATELIMITED(mors, "Bulk read buffer is not aligned to %u bytes\n",
 					mors->bus_ops->bulk_alignment);
 			ret = -EBADE;
@@ -404,21 +406,24 @@ exit:
 	return ret;
 }
 
-static int morse_sdio_dm_write(struct morse *mors, u32 address, const u8 *data, u32 len)
+static int morse_sdio_dm_write(struct morse *mors, u32 address, const u8 *data, int len)
 {
 	int ret = 0;
 	struct morse_sdio *sdio = (struct morse_sdio *)mors->drv_priv;
-	u32 remaining = len;
-	u32 offset = 0;
+	int remaining = len;
+	int offset = 0;
 
-	while (remaining) {
+	if (WARN_ON(len < 0))
+		return -EINVAL;
+
+	while (remaining > 0) {
 		/*
 		 * We can only write up to the end of a single window in
 		 * each write operation.
 		 */
 		u32 window_end = (address + offset) | ~MORSE_SDIO_RW_ADDR_BOUNDARY_MASK;
 
-		len = min(remaining, window_end + 1 - address - offset);
+		len = min(remaining, (int)(window_end + 1 - address - offset));
 		ret = morse_sdio_mem_write(sdio, address + offset, (u8 *)(data + offset), len);
 		if (ret != len)
 			goto err;
@@ -435,23 +440,26 @@ err:
 	return -EIO;
 }
 
-static int morse_sdio_dm_read(struct morse *mors, u32 address, u8 *data, u32 len)
+static int morse_sdio_dm_read(struct morse *mors, u32 address, u8 *data, int len)
 {
 	int ret = 0;
 	struct morse_sdio *sdio = (struct morse_sdio *)mors->drv_priv;
-	u32 remaining = len;
-	u32 offset = 0;
+	int remaining = len;
+	int offset = 0;
+
+	if (WARN_ON(len < 0))
+		return -EINVAL;
 
 	MORSE_WARN_ON(FEATURE_ID_SDIO, len % 4);
 
-	while (remaining) {
+	while (remaining > 0) {
 		/*
 		 * We can only read up to the end of a single window in
 		 * each read operation.
 		 */
 		u32 window_end = (address + offset) | ~MORSE_SDIO_RW_ADDR_BOUNDARY_MASK;
 
-		len = min(remaining, window_end + 1 - address - offset);
+		len = min(remaining, (int)(window_end + 1 - address - offset));
 		ret = morse_sdio_mem_read(sdio, address + offset, data + offset, len);
 		if (ret != len)
 			goto err;
@@ -553,8 +561,7 @@ static void morse_sdio_bus_enable(struct morse *mors, bool enable)
 		sdio_claim_host(func);
 
 		host->ops->enable_sdio_irq(host, 0);
-		sdio->bulk_addr_base = 0;
-		sdio->register_addr_base = 0;
+		morse_sdio_reset_base_address(sdio);
 		sdio->enabled = false;
 		MORSE_SDIO_DBG(mors, "%s: disabling bus\n", __func__);
 
@@ -728,6 +735,7 @@ static int morse_sdio_probe(struct sdio_func *func, const struct sdio_device_id 
 	sdio->func = func;
 	sdio->id = id;
 	sdio->enabled = true;
+	morse_sdio_reset_base_address(sdio);
 
 	mors->bus_ops = &morse_sdio_ops;
 	mors->bus_type = MORSE_HOST_BUS_TYPE_SDIO;
@@ -747,9 +755,8 @@ static int morse_sdio_probe(struct sdio_func *func, const struct sdio_device_id 
 	}
 
 	/* setting gpio pin configs from device tree */
-	morse_of_probe(dev, mors->cfg, morse_of_match_table);
-
-	mors->cfg->mm_ps_gpios_supported = true;
+	if (morse_of_probe(dev, mors->cfg, morse_of_match_table) < 0)
+		goto err_cfg;
 
 	/* Digital reset the chip now if external (host) xtal initialisation is required */
 	if (enable_ext_xtal_init) {

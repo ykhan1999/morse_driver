@@ -1,19 +1,7 @@
 /*
  * Copyright 2021-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -577,6 +565,7 @@ int morse_pager_sw_pagesets_init(struct morse *mors)
 	morse_pager_irq_enable(tx_return, true);
 	morse_pager_irq_enable(rx_data, true);
 	morse_pager_tx_status_irq_enable(mors, true);
+	morse_hw_enable_stop_notifications(mors, true);
 
 	morse_release_bus(mors);
 	return ret;

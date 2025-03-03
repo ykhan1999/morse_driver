@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -96,10 +84,9 @@
 #define MORSE_INT_NDP_PROBE_REQ_PV0_VIF_MASK_ALL	(GENMASK(26, 25))
 #define MORSE_INT_NDP_PROBE_REQ_PV0_BASE_NUM		(25)
 
-#define MORSE_WAKEPIN_RPI_GPIO_DEFAULT                  (3)
-#define MORSE_ASYNC_WAKEUP_FROM_CHIP_RPI_GPIO_DEFAULT   (7)
-#define MORSE_RESETPIN_RPI_GPIO_DEFAULT                 (5)
-#define MORSE_SPI_HW_IRQ_RPI_GPIO_DEFAULT               (25)
+/** Bit 27 Chip to Host stop notify */
+#define MORSE_INT_HW_STOP_NOTIFICATION_NUM	(27)
+#define MORSE_INT_HW_STOP_NOTIFICATION		BIT(MORSE_INT_HW_STOP_NOTIFICATION_NUM)
 
 /* OTP Bootrom XTAL wait bits[89:86] for MM610x */
 #define MM610X_OTP_DATA2_XTAL_WAIT_POS	GENMASK(25, 22)
@@ -352,6 +339,23 @@ bool morse_hw_is_valid_chip_id(u32 chip_id, u32 *valid_chip_ids);
  * Return: int return code.
  */
 int morse_hw_regs_attach(struct morse_hw_cfg *cfg, u32 chip_id);
+
+/**
+ * morse_hw_enable_stop_notifications - Enable/Disable chip->host notification on stop.
+ *
+ * @mors: morse config struct
+ * @enable: true to enable
+ *
+ * Return: int return code.
+ */
+int morse_hw_enable_stop_notifications(struct morse *mors, bool enable);
+
+/**
+ * morse_hw_stop_work - Work to handle a hardware stop.
+ *
+ * @work: Work item
+ */
+void morse_hw_stop_work(struct work_struct *work);
 
 /**
  * morse_chip_cfg_detect_and_init - Read the chip_id at the `chip_id_address` and

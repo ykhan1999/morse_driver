@@ -1,25 +1,9 @@
 /*
  * Copyright 2022-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <linux/timer.h>
-
-#if defined MORSE_CAC_TEST
-#include <linux/random.h>
-#endif
 
 #include <linux/bitfield.h>
 
@@ -28,6 +12,9 @@
 #include "debug.h"
 
 #define MORSE_CAC_DBG(_m, _f, _a...)	morse_dbg(FEATURE_ID_CAC, _m, _f, ##_a)
+#define MORSE_CAC_INFO(_m, _f, _a...)	morse_info(FEATURE_ID_CAC, _m, _f, ##_a)
+#define MORSE_CAC_WARN(_m, _f, _a...)	morse_warn(FEATURE_ID_CAC, _m, _f, ##_a)
+#define MORSE_CAC_ERR(_m, _f, _a...)	morse_err(FEATURE_ID_CAC, _m, _f, ##_a)
 
 /*
  * 802.11ah CAC (Centralized Authentication Control)
@@ -37,8 +24,21 @@
 #define MORSE_CAC_CHECK_INTERVAL_MS	100
 #define MORSE_CAC_CHECK_PERIOD_MS	1000
 
-void morse_cac_count_auth(const struct ieee80211_vif *vif,
-			  const struct ieee80211_mgmt *hdr, size_t len)
+struct cac_threshold_change_rules cac_threshold_change_rules_default = {
+	6,
+	{
+		/* Increase threshold rules */
+		{ 16, -255 },
+		{ 12, -122 },
+		{ 10, -61 },
+		/* Decrease threshold rules */
+		{ 4, 255 },
+		{ 6, 122 },
+		{ 8, 61 },
+	}
+};
+
+void morse_cac_count_auth(const struct ieee80211_vif *vif, const struct ieee80211_mgmt *hdr)
 {
 	struct morse_vif *mors_vif = (struct morse_vif *)vif->drv_priv;
 	struct morse_cac *cac = &mors_vif->cac;
@@ -53,22 +53,50 @@ void morse_cac_count_auth(const struct ieee80211_vif *vif,
 
 static void cac_threshold_change(struct morse_cac *cac, int diff)
 {
-	int threshold_index = cac->threshold_index + diff;
+	int threshold_value = cac->threshold_value + diff;
 
-	if (threshold_index < 0)
-		cac->threshold_index = 0;
-	else if (threshold_index > CAC_INDEX_MAX)
-		cac->threshold_index = CAC_INDEX_MAX;
+	if (threshold_value < 0)
+		cac->threshold_value = 0;
+	else if (threshold_value > CAC_THRESHOLD_MAX)
+		cac->threshold_value = CAC_THRESHOLD_MAX;
 	else
-		cac->threshold_index = threshold_index;
+		cac->threshold_value = threshold_value;
 }
+
+#undef MORSE_CAC_TEST
+#if defined MORSE_CAC_TEST
+
+#include <linux/random.h>
+
+#define CAC_TEST_PERIOD		(8)	/* Period in tenths of a second */
+#define CAC_TEST_ARFS_MAX	(20)	/* Max random ARFS value */
+
+/* Set ARFS to a random value */
+void cac_test(struct morse_cac *cac)
+{
+	struct morse *mors = cac->mors;
+	static int cnt;
+
+	cnt++;
+	if ((cnt % CAC_TEST_PERIOD) == 0) {
+		u16 random;
+
+		get_random_bytes(&random, sizeof(random));
+		cac->arfs = random % CAC_TEST_ARFS_MAX;
+		MORSE_CAC_INFO(mors, "CAC: TEST set ARFS to %u\n", cac->arfs);
+	}
+}
+
+#else
+#define cac_test(_cac)
+#endif
 
 /**
  * @brief Adjust the CAC threshold based on frequency of Rx authentication frames
  *
  * If the number of authentication frames received within the checking interval
  * exceeds predefined thresholds, reduce the CAC threshold in order to reduce the
- * number of stations which are allowed to start association.
+ * number of stations that are allowed to start association.
  *
  * This check is performed many times per second in order to react quickly to a
  * surge in associations (E.g. after an AP or network restart). If the threshold
@@ -77,6 +105,41 @@ static void cac_threshold_change(struct morse_cac *cac, int diff)
  * If the end of the checking period is reached and only a small number of stations
  * have associated, the CAC threshold is increased (relaxed).
  */
+static int cac_set_threshold_change(struct morse_cac *cac, bool end_of_period)
+{
+	struct morse *mors = cac->mors;
+	int i;
+
+	for (i = 0; i < cac->rules.rule_tot; i++) {
+		struct cac_threshold_change_rule *rule = &cac->rules.rule[i];
+
+		MORSE_CAC_DBG(mors, "CAC:   %i: arfs=%u change=%d\n",
+			i, rule->arfs, rule->threshold_change);
+
+		if (rule->threshold_change < 0) {
+			/* Process rule to decrease threshold */
+			if (cac->arfs > rule->arfs) {
+				/* Decrease threshold */
+				return rule->threshold_change;
+			}
+		} else {
+			/* Process rule to increase threshold */
+			if (cac->threshold_value == CAC_THRESHOLD_MAX)
+				/* Already at max */
+				return 0;
+			if (!end_of_period)
+				/* Only increase at the end of a sample period */
+				return 0;
+			if (cac->arfs < rule->arfs) {
+				/* Increase threshold */
+				return rule->threshold_change;
+			}
+		}
+	}
+
+	return 0;
+}
+
 static void cac_timer_work(struct morse_cac *cac)
 {
 	struct morse *mors = cac->mors;
@@ -86,59 +149,29 @@ static void cac_timer_work(struct morse_cac *cac)
 	if (!cac->enabled)
 		return;
 
+	cac_test(cac);
+
 	cac->cac_period_used += MORSE_CAC_CHECK_INTERVAL_MS;
 	if (cac->cac_period_used >= MORSE_CAC_CHECK_PERIOD_MS)
 		end_of_period = true;
 
-	/*
-	 * If there are too many authentication requests, reduce the threshold.
-	 * If CAC threshold is not at min and there have been few authentication
-	 * requests, increase the threshold.
-	 */
-	if (cac->arfs > 16) {
-		threshold_change = -4;
-	} else if (cac->arfs > 12) {
-		threshold_change = -2;
-	} else if (cac->arfs > 10) {
-		threshold_change = -1;
-	} else if ((cac->threshold_index < CAC_INDEX_MAX) && end_of_period) {
-		if (cac->arfs <= 4)
-			threshold_change = 4;
-		else if (cac->arfs <= 6)
-			threshold_change = 2;
-		else if (cac->arfs <= 8)
-			threshold_change = 1;
-	}
-
-	if (threshold_change != 0) {
-		cac_threshold_change(cac, threshold_change);
-		MORSE_CAC_DBG(mors,
-				"CAC ARFS=%u period=%u adjust=%d idx=%u threshold=%u\n",
-				cac->arfs,
-				cac->cac_period_used,
-				threshold_change, cac->threshold_index,
-				cac->threshold_index * CAC_THRESHOLD_STEP);
-		end_of_period = true;
+	/* Check if the threshold needs to be tighted or relaxed and set. */
+	if (cac->arfs != 0 || cac->threshold_value != CAC_THRESHOLD_MAX) {
+		MORSE_CAC_DBG(mors, "CAC: Check ARFS=%u threshold=%u end=%u\n",
+			      cac->arfs, cac->threshold_value, end_of_period);
+		threshold_change = cac_set_threshold_change(cac, end_of_period);
+		if (threshold_change != 0) {
+			cac_threshold_change(cac, threshold_change);
+			MORSE_CAC_INFO(mors, "CAC: Set threshold %u (period=%u)\n",
+				cac->threshold_value, cac->cac_period_used);
+			end_of_period = true;
+		}
 	}
 
 	if (end_of_period) {
 		cac->cac_period_used = 0;
 		cac->arfs = 0;
 	}
-#if defined MORSE_CAC_TEST
-	{
-		static int cnt;
-
-		if ((cnt++ % 16) == 0) {
-			u16 random;
-
-			get_random_bytes(&random, sizeof(random));
-			cac->threshold_index = random % 8;
-			MORSE_CAC_DBG(mors, "CAC TESTING change index to %u\n",
-					cac->threshold_index);
-		}
-	}
-#endif
 
 	mod_timer(&cac->timer, jiffies + msecs_to_jiffies(MORSE_CAC_CHECK_INTERVAL_MS));
 }
@@ -166,7 +199,6 @@ void morse_cac_insert_ie(struct dot11ah_ies_mask *ies_mask, struct ieee80211_vif
 {
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 	struct dot11ah_s1g_auth_control_ie cac_ie = { 0 };
-	u16 threshold;
 
 	if (!mors_vif->cac.enabled)
 		return;
@@ -175,12 +207,7 @@ void morse_cac_insert_ie(struct dot11ah_ies_mask *ies_mask, struct ieee80211_vif
 	if (!ieee80211_is_probe_resp(fc) && !ieee80211_is_beacon(fc))
 		return;
 
-	threshold = mors_vif->cac.threshold_index * CAC_THRESHOLD_STEP;
-
-	/* Max index converts to (threshold max + 1), so adjust */
-	if (threshold > CAC_THRESHOLD_MAX)
-		threshold = CAC_THRESHOLD_MAX;
-	cac_ie.parameters = FIELD_PREP(DOT11AH_S1G_CAC_THRESHOLD, threshold);
+	cac_ie.parameters = FIELD_PREP(DOT11AH_S1G_CAC_THRESHOLD, mors_vif->cac.threshold_value);
 
 	morse_dot11ah_insert_element(ies_mask, WLAN_EID_S1G_CAC, (u8 *)&cac_ie, sizeof(cac_ie));
 }
@@ -207,6 +234,40 @@ int morse_cac_deinit(struct morse_vif *mors_vif)
 	del_timer_sync(&cac->timer);
 
 	return 0;
+}
+
+static void morse_cac_cfg_threshold_rules_default(struct morse *mors, struct morse_vif *mors_vif)
+{
+	struct morse_cac *cac = &mors_vif->cac;
+
+	spin_lock_bh(&cac->lock);
+
+	memcpy(&cac->rules, &cac_threshold_change_rules_default, sizeof(cac->rules));
+
+	spin_unlock_bh(&cac->lock);
+}
+
+void morse_cac_get_rules(struct morse_vif *mors_vif, struct cac_threshold_change_rules *rules,
+			 u8 *rule_tot)
+{
+	struct morse_cac *cac = &mors_vif->cac;
+
+	spin_lock_bh(&cac->lock);
+
+	memcpy(rules, &cac->rules, sizeof(cac->rules));
+
+	spin_unlock_bh(&cac->lock);
+}
+
+void morse_cac_set_rules(struct morse_vif *mors_vif, struct cac_threshold_change_rules *rules)
+{
+	struct morse_cac *cac = &mors_vif->cac;
+
+	spin_lock_bh(&cac->lock);
+
+	memcpy(&cac->rules, rules, sizeof(cac->rules));
+
+	spin_unlock_bh(&cac->lock);
 }
 
 int morse_cac_init(struct morse *mors, struct morse_vif *mors_vif)
@@ -236,7 +297,8 @@ int morse_cac_init(struct morse *mors, struct morse_vif *mors_vif)
 #endif
 
 	mod_timer(&cac->timer, jiffies + msecs_to_jiffies(MORSE_CAC_CHECK_INTERVAL_MS));
-	cac->threshold_index = CAC_INDEX_MAX;
+	cac->threshold_value = CAC_THRESHOLD_MAX;
+	morse_cac_cfg_threshold_rules_default(mors, mors_vif);
 	cac->enabled = 1;
 
 	return 0;

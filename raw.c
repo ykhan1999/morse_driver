@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include "debug.h"
 #include "raw.h"
@@ -586,7 +574,7 @@ static u8 *morse_raw_generate_assignment(struct morse_vif *mors_vif,
 
 		if (current_beacon_end_aid_idx < current_beacon_start_aid_idx) {
 			/* This should never happen */
-			MORSE_WARN_ON_ONCE(FEATURE_ID_DEFAULT, 1);
+			MORSE_WARN_ON_ONCE(FEATURE_ID_RAW, 1);
 			current_beacon_end_aid_idx = current_beacon_start_aid_idx;
 		}
 
@@ -786,12 +774,17 @@ static void morse_raw_update_praw_after_bcn(struct morse_raw *raw)
  */
 static int raw_bsearch_aid_indexes(const struct morse_aid_list *aid_list, u16 aid)
 {
-	u16 start_idx = 0;
-	u16 end_idx = aid_list->num_aids - 1;
-	s16 mid_idx = 0;
+	int start_idx = 0;
+	int end_idx = aid_list->num_aids - 1;
+	int mid_idx = 0;
+
+	MORSE_WARN_ON(FEATURE_ID_RAW, aid_list->num_aids == 0);
+	if (aid_list->num_aids == 1)
+		return 0;
 
 	while (start_idx <= end_idx) {
 		mid_idx = start_idx + ((end_idx - start_idx) / 2);
+
 		if (aid_list->aids[mid_idx] == aid)
 			return mid_idx;
 		else if (aid_list->aids[mid_idx] > aid)
@@ -804,9 +797,9 @@ static int raw_bsearch_aid_indexes(const struct morse_aid_list *aid_list, u16 ai
 
 	/* could not find the AID, so return the rounded down index */
 	if (aid_list->aids[mid_idx] > aid)
-		return max(mid_idx - 1, 0);
-	else
-		return mid_idx;
+		mid_idx = max(mid_idx - 1, 0);
+
+	return mid_idx;
 }
 
 /**

@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -167,6 +155,7 @@ static int read_page_stats(struct seq_file *file, void *data)
 	print_stat(file, "TX status dropped", mors->debug.page_stats.tx_status_dropped);
 	print_stat(file, "RX empty queue", mors->debug.page_stats.rx_empty);
 	print_stat(file, "RX packet split across window", mors->debug.page_stats.rx_split);
+	print_stat(file, "RX invalid byte count", mors->debug.page_stats.rx_invalid_count);
 	print_stat(file, "Invalid checksum", mors->debug.page_stats.invalid_checksum);
 	print_stat(file, "Invalid TX status checksum",
 		mors->debug.page_stats.invalid_tx_status_checksum);
@@ -202,6 +191,18 @@ static int read_firmware_path(struct seq_file *file, void *data)
 	return 0;
 }
 
+static const char *rc_method_to_string(enum morse_rc_method method)
+{
+	switch (method) {
+	case MORSE_RC_METHOD_MINSTREL:
+		return "Minstrel";
+	case MORSE_RC_METHOD_MMRC:
+		return "MMRC";
+	default:
+		return "Unknown";
+	}
+}
+
 static void read_vendor_operations(struct seq_file *file, struct morse_ops *ops)
 {
 	seq_puts(file, "    Features in operation\n");
@@ -224,6 +225,8 @@ static void read_sta_vendor_info_iter(void *data, struct ieee80211_sta *sta)
 		   mors_sta->vendor_info.sw_ver.major, mors_sta->vendor_info.sw_ver.minor,
 		   mors_sta->vendor_info.sw_ver.patch);
 	seq_printf(file, "    HW version: 0x%08x\n", mors_sta->vendor_info.chip_id);
+	seq_printf(file, "    Rate control: %s\n",
+		   rc_method_to_string(mors_sta->vendor_info.rc_method));
 	seq_puts(file, "    Capabilities\n");
 	seq_printf(file, "      MMSS: %u\n", mors_sta->ampdu_mmss);
 	seq_printf(file, "      MMSS offset: %u\n", mors_sta->vendor_info.morse_mmss_offset);
@@ -241,7 +244,7 @@ static int read_vendor_info_tbl(struct seq_file *file, void *data)
 	seq_printf(file, "    SW version: %d.%d.%d\n", mors->sw_ver.major,
 		   mors->sw_ver.minor, mors->sw_ver.patch);
 	seq_printf(file, "    HW version: 0x%08x\n", mors->chip_id);
-
+	seq_printf(file, "    Rate control: %s\n", rc_method_to_string(mors->rc_method));
 	for (vif_id = 0; vif_id < mors->max_vifs; vif_id++) {
 		struct ieee80211_vif *vif = morse_get_vif_from_vif_id(mors, vif_id);
 		struct morse_vif *mors_vif;
@@ -274,6 +277,8 @@ static int read_vendor_info_tbl(struct seq_file *file, void *data)
 				   mors_vif->bss_vendor_info.sw_ver.patch);
 			seq_printf(file, "    HW version: 0x%08x\n",
 				   mors_vif->bss_vendor_info.chip_id);
+			seq_printf(file, "    Rate control: %s\n",
+				   rc_method_to_string(mors_vif->bss_vendor_info.rc_method));
 			seq_puts(file, "    Capabilities\n");
 			seq_printf(file, "      MMSS: %u\n", mors_vif->bss_ampdu_mmss);
 			seq_printf(file, "      MMSS offset: %u\n",

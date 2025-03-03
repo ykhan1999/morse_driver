@@ -4,19 +4,7 @@
 /*
  * Copyright 2024 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include "morse.h"
@@ -55,8 +43,11 @@ struct morse_hw_scan_params {
 	/** Filled out probe request */
 	struct sk_buff *probe_req;
 
-	/** Number of channels in @ref channels*/
+	/** Number of channels in @ref channels, must not exceed @ref allocated_chans */
 	u16 num_chans;
+
+	/** Max allocated channels in @ref channels */
+	u16 allocated_chans;
 
 	/** List of channels */
 	struct {
@@ -66,10 +57,6 @@ struct morse_hw_scan_params {
 		u8 power_idx;
 	} *channels;
 
-	/** Primary 1mhz channel index to use */
-	u8 prim_1mhz_ch_idx;
-	/** Primary bandwidth to use */
-	u8 prim_bw_mhz;
 	/** List of possible powers */
 	s32 *powers_qdbm;
 	/** Number of powers in @ref powers_qdbm */

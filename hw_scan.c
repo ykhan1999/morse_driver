@@ -1,19 +1,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
 #include <linux/bitfield.h>
@@ -164,41 +152,24 @@ bool hw_scan_is_idle(struct morse *mors)
  * morse_hw_scan_pack_channel - Pack a channel into a u32 to add to the HW scan channel TLV
  *
  * @chan: dot11ah channel to pack
- * @prim_ch_width_mhz: primary channel width to pack
- * @prim_ch_idx: primary channel 1mhz index to pack
  * @pwr_idx: Index into power TLV for this channel
  * Return: packed channel
  */
-static inline __le32 morse_hw_scan_pack_channel(const struct morse_dot11ah_channel *chan,
-						u8 prim_ch_width_mhz, u8 prim_ch_idx, u8 pwr_idx)
+static __le32 morse_hw_scan_pack_channel(const struct morse_dot11ah_channel *chan,
+					 u8 pwr_idx)
 {
-	u8 op_bw_mhz;
 	u32 packed_channel;
-	u32 freq_khz;
-
-	if (chan->ch.flags & IEEE80211_CHAN_8MHZ) {
-		op_bw_mhz = 8;
-		prim_ch_idx = min_t(u8, prim_ch_idx, 7);
-		prim_ch_width_mhz = min_t(u8, prim_ch_width_mhz, 2);
-	} else if (chan->ch.flags & IEEE80211_CHAN_4MHZ) {
-		op_bw_mhz = 4;
-		prim_ch_idx = min_t(u8, prim_ch_idx, 3);
-		prim_ch_width_mhz = min_t(u8, prim_ch_width_mhz, 2);
-	} else if (chan->ch.flags & IEEE80211_CHAN_2MHZ) {
-		op_bw_mhz = 2;
-		prim_ch_idx = min_t(u8, prim_ch_idx, 1);
-		prim_ch_width_mhz = min_t(u8, prim_ch_width_mhz, 2);
-	} else { /* 1mhz */
-		op_bw_mhz = 1;
-		prim_ch_idx = 0;
-		prim_ch_width_mhz = 1;
-	}
-
-	freq_khz = morse_dot11ah_channel_to_freq_khz(chan->ch.hw_value);
+	u32 freq_khz = morse_dot11ah_channel_to_freq_khz(chan->ch.hw_value);
+	u8 op_bw_mhz = ch_flag_to_chan_bw(chan->ch.flags);
+	/* It is expected that the steps in @ref hw_scan_initalise_channel_and_power_lists will
+	 * deconstruct any non-primary channels into their primary variants.
+	 */
+	u8 prim_bw_mhz = min_t(u8, op_bw_mhz, 2);
+	u8 prim_ch_idx = 0;
 
 	packed_channel = BMSET(freq_khz, HW_SCAN_CH_LIST_FREQ_KHZ) |
 		BMSET(morse_ratecode_bw_mhz_to_bw_index(op_bw_mhz), HW_SCAN_CH_LIST_OP_BW) |
-		BMSET(morse_ratecode_bw_mhz_to_bw_index(prim_ch_width_mhz),
+		BMSET(morse_ratecode_bw_mhz_to_bw_index(prim_bw_mhz),
 				HW_SCAN_CH_LIST_PRIM_CH_WIDTH) |
 		BMSET(prim_ch_idx, HW_SCAN_CH_LIST_PRIM_CH_IDX) |
 		BMSET(pwr_idx, HW_SCAN_CH_LIST_PWR_LIST_IDX);
@@ -227,8 +198,8 @@ static u8 *hw_scan_add_channel_list_tlv(u8 *buf, struct morse_hw_scan_params *pa
 	for (i = 0; i < params->num_chans; i++) {
 		const struct morse_dot11ah_channel *chan = params->channels[i].channel;
 
-		ch_list->channels[i] = morse_hw_scan_pack_channel(chan, params->prim_bw_mhz,
-					params->prim_1mhz_ch_idx, params->channels[i].power_idx);
+		ch_list->channels[i] = morse_hw_scan_pack_channel(chan,
+								  params->channels[i].power_idx);
 
 		MORSE_HWSCAN_DBG(mors, "[%d] : %08x (freq: %u khz, bw: %d, pwr_idx: %d)\n", i,
 			ch_list->channels[i],
@@ -365,54 +336,204 @@ static int hw_scan_initialise_probe_req(struct morse_hw_scan_params *params,
 }
 
 /**
+ * channel_is_in_hw_scan_list - Determine if the provided channel (pointer into channel map)
+ *                           already exists in the pending HW scan channel list.
+ *
+ * @params: The HW scan parameters object
+ * @chan: The channel to search for
+ *
+ * Return: true if channel exists
+ */
+static bool channel_is_in_hw_scan_list(const struct morse_hw_scan_params *params,
+				       const struct morse_dot11ah_channel *chan)
+{
+	int channel;
+
+	for (channel = 0; channel < params->num_chans; channel++) {
+		if (params->channels[channel].channel == chan)
+			return true;
+	}
+
+	return false;
+}
+
+/**
+ * insert_channel_into_hw_scan_list - Insert new S1G channel into the pending HW scan channel list.
+ *
+ * @params: The HW scan parameters object
+ * @chan: The channel to insert
+ *
+ * Return: 0 if insertion successful, else error
+ */
+static int insert_channel_into_hw_scan_list(struct morse_hw_scan_params *params,
+					    const struct morse_dot11ah_channel *chan)
+{
+	if (!params->channels)
+		return -EFAULT;
+
+	if (!chan)
+		return -EFAULT;
+
+	if (params->num_chans >= params->allocated_chans)
+		return -ENOMEM;
+
+	if (channel_is_in_hw_scan_list(params, chan))
+		return 0;
+
+	params->channels[params->num_chans].channel = chan;
+	params->num_chans++;
+	return 0;
+}
+
+/**
+ * deconstruct_scan_channel_into_scan_list - Given an input S1G channel whose operating bandwidth
+ *                                           is larger than the 1 & 2 MHz primaries, deconstruct
+ *                                           into primary variants and insert into pending HW scan
+ *                                           list.
+ *
+ * @params: The HW scan parameters object
+ * @chan: The channel to deconstruct/insert
+ *
+ * Return: 0 if insertion successful, else error
+ */
+static int deconstruct_scan_channel_into_scan_list(struct morse_hw_scan_params *params,
+						   const struct morse_dot11ah_channel *chan)
+{
+	u8 op_bw;
+	u8 prim_bw;
+	u8 prim_idx;
+	struct morse *mors;
+
+	if (!chan || !params) {
+		MORSE_WARN_ON(FEATURE_ID_HWSCAN, 1);
+		return -EFAULT;
+	}
+
+	mors = params->hw->priv;
+	op_bw = ch_flag_to_chan_bw(chan->ch.flags);
+	if (op_bw <= 2 || op_bw > 8) {
+		/* This function shouldn't be called for channels that are outside expected range.
+		 * Ignore this.
+		 */
+		MORSE_WARN_ON(FEATURE_ID_HWSCAN, 1);
+		return -EINVAL;
+	}
+
+	MORSE_HWSCAN_DBG(mors, "Deconstructing ch %d (%d KHz, %d MHz) into primaries",
+			 chan->ch.hw_value, morse_dot11ah_channel_to_freq_khz(chan->ch.hw_value),
+			 op_bw);
+
+	/* For each primary variant (1MHz & 2MHz), deconstruct the operating bandwidth into its
+	 * constituent primaries and insert into scan list if they don't already exist within it.
+	 */
+	for (prim_bw = 1; prim_bw <= 2; prim_bw++) {
+		for (prim_idx = 0; prim_idx < op_bw; prim_idx += prim_bw) {
+			int ret;
+			int prim_freq_khz;
+			const struct morse_dot11ah_channel *s1g_chan;
+			int prim_chan = morse_dot11ah_calc_prim_s1g_chan(op_bw, prim_bw,
+									 chan->ch.hw_value,
+									 prim_idx);
+
+			MORSE_WARN_ON(FEATURE_ID_HWSCAN, prim_chan < 0);
+			if (prim_chan < 0)
+				continue;
+
+			prim_freq_khz = morse_dot11ah_channel_to_freq_khz(prim_chan);
+
+			s1g_chan = morse_dot11ah_s1g_freq_to_s1g(KHZ_TO_HZ(prim_freq_khz), prim_bw);
+			if (!s1g_chan) {
+				MORSE_HWSCAN_ERR(mors,
+						 "   ch %d (%d KHz, %d MHz) Error - undefined",
+						 prim_chan, prim_freq_khz, prim_bw);
+				continue;
+			}
+
+			MORSE_HWSCAN_DBG(mors, "   ch %d (%d KHz, %d MHz)",
+					 prim_chan, prim_freq_khz, prim_bw);
+
+			ret = insert_channel_into_hw_scan_list(params, s1g_chan);
+			if (ret)
+				return ret;
+		}
+	}
+
+	return 0;
+}
+
+/**
  * hw_scan_initalise_channel_and_power_lists - Initialise channel and power lists for HW scan
  *
  * @params: HW scan params
  * Return: 0 if success, otherwise error code
  */
 static int hw_scan_initalise_channel_and_power_lists(struct morse_hw_scan_params *params,
-		struct cfg80211_scan_request *request)
+						     struct cfg80211_scan_request *request)
 {
 	int i, j;
-	int n_chans = request->n_channels;
 	struct ieee80211_channel **chans = request->channels;
-	int num_s1g_chans = 0;
-	/**
-	 * Coarse count of number of powers, so we can allocate for them.
-	 * Actual number may be less..
-	 */
-	int num_pwrs = 0;
+	int num_pwrs_coarse = 0;
 	int last_pwr = INT_MIN;
+	int chans_to_allocate = 0;
 
 	/* should not already be filled.. */
-	WARN_ON(params->channels);
-	WARN_ON(params->powers_qdbm);
+	MORSE_WARN_ON(FEATURE_ID_HWSCAN, params->channels);
+	MORSE_WARN_ON(FEATURE_ID_HWSCAN, params->powers_qdbm);
 
-	params->channels = kcalloc(n_chans, sizeof(*params->channels), GFP_KERNEL);
+	/* Determine how many channels to allocate for */
+	for (i = 0; i < request->n_channels; i++) {
+		const struct morse_dot11ah_channel *chan = morse_dot11ah_5g_chan_to_s1g(chans[i]);
+		int op_bw;
+
+		if (!chan)
+			continue;
+
+		/* 8 and 4 MHz channels will be deconstructed their constituent 1MHz and 2MHz
+		 * primary variants. Ensure there is space for them.
+		 */
+		op_bw = ch_flag_to_chan_bw(chan->ch.flags);
+		if (op_bw > 2)
+			chans_to_allocate += ((op_bw / 1) + (op_bw / 2));
+		else
+			chans_to_allocate++;
+	}
+
+	params->num_chans = 0;
+	params->allocated_chans = 0;
+	params->channels = kcalloc(chans_to_allocate, sizeof(*params->channels), GFP_KERNEL);
 	if (!params->channels)
 		return -ENOMEM;
+	params->allocated_chans = chans_to_allocate;
 
-	for (i = 0; i < n_chans; i++) {
+	for (i = 0; i < request->n_channels; i++) {
 		const struct morse_dot11ah_channel *chan = morse_dot11ah_5g_chan_to_s1g(chans[i]);
 
 		if (!chan)
 			continue;
 
-		params->channels[num_s1g_chans++].channel = chan;
+		if (ch_flag_to_chan_bw(chan->ch.flags) > 2)
+			deconstruct_scan_channel_into_scan_list(params, chan);
+		else
+			insert_channel_into_hw_scan_list(params, chan);
+	}
+
+	/* Calculate a rough estimate of number of different channel powers required */
+	for (i = 0; i < params->num_chans; i++) {
+		const struct morse_dot11ah_channel *chan =  params->channels[i].channel;
+
 		if (chan->ch.max_reg_power != last_pwr) {
 			last_pwr = chan->ch.max_reg_power;
-			num_pwrs++;
+			num_pwrs_coarse++;
 		}
 	}
-	params->num_chans = num_s1g_chans;
 
-	params->powers_qdbm = kmalloc_array(num_pwrs, sizeof(*params->powers_qdbm), GFP_KERNEL);
+	params->powers_qdbm = kmalloc_array(num_pwrs_coarse, sizeof(*params->powers_qdbm),
+					    GFP_KERNEL);
 	if (!params->powers_qdbm)
 		return -ENOMEM;
-
 	params->n_powers = 0;
 
-	for (i = 0; i < num_s1g_chans; i++) {
+	for (i = 0; i < params->num_chans; i++) {
 		const struct morse_dot11ah_channel *chan = params->channels[i].channel;
 		s32 power_qdbm = MBM_TO_QDBM(chan->ch.max_reg_power);
 
@@ -425,8 +546,8 @@ static int hw_scan_initalise_channel_and_power_lists(struct morse_hw_scan_params
 		if (j == params->n_powers) {
 			params->powers_qdbm[j] = power_qdbm;
 			params->n_powers++;
-			if (params->n_powers > num_pwrs) {
-				WARN_ON(1);
+			if (params->n_powers > num_pwrs_coarse) {
+				MORSE_WARN_ON(FEATURE_ID_HWSCAN, 1);
 				return -EFAULT;
 			}
 		}
@@ -448,6 +569,9 @@ static void hw_scan_clean_up_params(struct morse_hw_scan_params *params)
 		dev_kfree_skb_any(params->probe_req);
 	kfree(params->channels);
 	kfree(params->powers_qdbm);
+
+	params->num_chans = 0;
+	params->allocated_chans = 0;
 }
 
 size_t morse_hw_scan_get_command_size(struct morse_hw_scan_params *params)
@@ -611,8 +735,6 @@ int morse_ops_hw_scan(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	params->has_directed_ssid = (req->ssids && req->ssids[0].ssid_len > 0);
 	params->dwell_time_ms = req->duration ?	MORSE_TU_TO_MS(req->duration) :
 		MORSE_HWSCAN_DEFAULT_DWELL_TIME_MS;
-	params->prim_1mhz_ch_idx = mors->custom_configs.default_bw_info.pri_1mhz_chan_idx;
-	params->prim_bw_mhz = mors->custom_configs.default_bw_info.pri_bw_mhz;
 	params->start = true;
 	/* We only care about survey records when doing ACS / AP things */
 	params->survey = (vif->type == NL80211_IFTYPE_AP);

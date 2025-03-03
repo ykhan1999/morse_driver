@@ -4,19 +4,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -267,7 +255,8 @@ void morse_insert_beacon_timing_element(struct morse_vif *mors_vif, struct sk_bu
  */
 int morse_mac_process_rx_mesh_probe_req(struct morse_vif *mors_vif,
 					struct dot11ah_ies_mask *ies_mask,
-					struct ieee80211_rx_status *rx_status, const u8 *src_addr);
+					const struct ieee80211_rx_status *rx_status,
+					const u8 *src_addr);
 
 /**
  * morse_mac_process_mesh_rx_mgmt() - Process Rx mgmt frame on Mesh interface
@@ -283,7 +272,7 @@ int morse_mac_process_rx_mesh_probe_req(struct morse_vif *mors_vif,
  */
 int morse_mac_process_mesh_rx_mgmt(struct morse_vif *mors_vif, struct sk_buff *skb,
 				   struct dot11ah_ies_mask *ies_mask,
-				   struct ieee80211_rx_status *rx_status);
+				   const struct ieee80211_rx_status *rx_status);
 
 /**
  * morse_mac_add_meshid_ie() - Fill in Mesh ID from SSID IE

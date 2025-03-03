@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <net/mac80211.h>
@@ -178,6 +166,19 @@ enum morse_mac_subbands_mode {
 };
 
 /**
+ * struct morse_twt_sta_vif - contains STA VIF's specific TWT state information
+ *
+ * @active_agreement_bitmap Bitmap of active TWT agreement for each of flow ids
+ * @cmd_work    Work queue struct to defer install/uninstall of twt agreementss.
+ * @to_install_uninstall    A queue of TWT agreements to install/uninstall to the chip.
+ */
+struct morse_twt_sta_vif {
+	unsigned long active_agreement_bitmap;
+	struct work_struct cmd_work;
+	struct list_head to_install_uninstall;
+};
+
+/**
  * struct morse_twt - contains TWT state and configuration information
  *
  * @stas		List of structures containing a agreements for a STA.
@@ -186,25 +187,28 @@ enum morse_mac_subbands_mode {
  *			intervals.
  * @events		A queue of TWT events to be processed.
  * @tx			A queue of TWT data to be sent.
- * @to_install		A queue of TWT agreements to install to the chip.
  * @req_event_tx	A TWT request event to be sent in the (re)assoc request frame.
  * @work		Work queue struct to defer processing of events.
  * @lock		Spinlock used to control access to lists/memory.
  * @requester		Whether or not the VIF is a TWT Requester.
  * @responder		Whether or not the VIF is a TWT Responder.
+ * @dialog_token	Dialog token of Tx action frames.
+ * @sta_vif		STA VIF specific data
  */
 struct morse_twt {
 	struct list_head stas;
 	struct list_head wake_intervals;
 	struct list_head events;
 	struct list_head tx;
-	struct list_head to_install;
 	u8 *req_event_tx;
 	struct work_struct work;
 	/* Protect TWT operations */
 	spinlock_t lock;
 	bool requester;
 	bool responder;
+	u8 dialog_token;
+	/* STA VIF specific data */
+	struct morse_twt_sta_vif sta_vif;
 };
 
 struct morse_mbssid_info {
@@ -276,6 +280,13 @@ struct morse_sw_version {
 	u8 patch;
 };
 
+/* Rate control method in use */
+enum morse_rc_method {
+	MORSE_RC_METHOD_UNKNOWN = 0,
+	MORSE_RC_METHOD_MINSTREL = 1,
+	MORSE_RC_METHOD_MMRC = 2,
+};
+
 /**
  * struct morse_vendor_info - filled from mm vendor IE
  */
@@ -299,6 +310,8 @@ struct morse_vendor_info {
 	 * page slicing)
 	 */
 	bool page_slicing_exclusive_support;
+	/** Rate control method in use */
+	enum morse_rc_method rc_method;
 };
 
 /** Morse Private STA record */
@@ -359,6 +372,9 @@ struct morse_sta {
 
 	/** Save stored status of peer STA from Header Compression Request on RX*/
 	struct morse_sta_pv1 rx_pv1_ctx;
+
+	/** Last received S1G protected action PN */
+	u64 last_rx_mgmt_pn;
 };
 
 /** Number of bits in AID bitmap.
@@ -717,9 +733,24 @@ struct morse_vif {
 	bool beaconing_enabled;
 
 	/**
-	 * The bandwidth of the last received probe request
+	 * Flag to check if multicast rate control is not enabled or not.
 	 */
-	u8 last_probe_req_bw_mhz;
+	bool enable_multicast_rate_control;
+
+	/**
+	 * Tx rate to be used for multicast traffic.
+	 */
+	struct mmrc_rate mcast_tx_rate;
+
+	/**
+	 * Throughput calculated using the above mcast_tx_rate.
+	 */
+	u32 mcast_tx_rate_throughput;
+
+	/**
+	 *  Work to evaluate the tx rate to use for multicast packets transmission.
+	 */
+	struct delayed_work mcast_tx_rate_work;
 
 };
 
@@ -766,6 +797,7 @@ struct morse_debug {
 		unsigned int tx_status_dropped;
 		unsigned int rx_empty;
 		unsigned int rx_split;
+		unsigned int rx_invalid_count;
 		unsigned int invalid_checksum;
 		unsigned int invalid_tx_status_checksum;
 	} page_stats;
@@ -851,6 +883,10 @@ enum morse_state_flags {
 	MORSE_STATE_FLAG_RELOAD_FW_AFTER_START,
 	/** Perform a core dump on next mac restart */
 	MORSE_STATE_FLAG_DO_COREDUMP,
+	/** TX from host to firmware is blocked */
+	MORSE_STATE_FLAG_HOST_TO_CHIP_TX_BLOCKED,
+	/** TX CMD from host to firmware is blocked */
+	MORSE_STATE_FLAG_HOST_TO_CHIP_CMD_BLOCKED,
 };
 
 /**
@@ -971,6 +1007,9 @@ struct morse {
 	bool enable_mbssid_ie;
 	/* Hardware scan is enabled/disabled */
 	bool enable_hw_scan;
+
+	/* Type of rate control method in use */
+	enum morse_rc_method rc_method;
 #ifdef CONFIG_MORSE_RC
 	struct morse_rc mrc;
 	int rts_threshold;
@@ -989,6 +1028,7 @@ struct morse {
 	struct work_struct driver_restart;
 	struct work_struct health_check;
 	struct work_struct tx_stale_work;
+	struct work_struct hw_stop;
 
 	struct morse_debug debug;
 
@@ -1025,6 +1065,12 @@ struct morse {
 		/* lock for accessing / modifying crash data */
 		struct mutex lock;
 	} coredump;
+
+	/* Kernel time of last HW stop event */
+	time64_t last_hw_stop;
+
+	/** The bandwidth of the last received probe request */
+	u8 last_probe_req_bw_mhz;
 
 	/* must be last */
 	u8 drv_priv[] __aligned(sizeof(void *));
@@ -1138,6 +1184,14 @@ static inline u64 mac2uint64(const u8 *bssid)
 {
 	return ((u64)(bssid[0]) << 40) | ((u64)(bssid[1]) << 32) | ((u64)(bssid[2]) << 24) |
 	       ((u64)(bssid[3]) << 16) | ((u64)(bssid[4]) << 8) | ((u64)(bssid[5]));
+}
+
+static inline bool is_assoc_frame(__le16 frame_control)
+{
+	return (ieee80211_is_assoc_req(frame_control) ||
+			ieee80211_is_reassoc_req(frame_control) ||
+			ieee80211_is_assoc_resp(frame_control) ||
+			ieee80211_is_reassoc_resp(frame_control));
 }
 
 int morse_beacon_init(struct morse_vif *mors_vif);

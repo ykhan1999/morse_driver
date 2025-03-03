@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -90,7 +78,7 @@ morse_skb_tx_status_to_tx_control(struct morse *mors, struct sk_buff *skb,
 	/* There will always be at least one rate tried. */
 	unsigned int last_i = 0;
 
-	/* Need the RCU lock to find a station, and must hold it until we're done with sta */
+	/* Must be held while finding and dereferencing sta */
 	rcu_read_lock();
 	vif = txi->control.vif ? txi->control.vif : morse_get_vif_from_tx_status(mors, tx_sts);
 	sta = ieee80211_find_sta(vif, hdr->addr1);
@@ -319,6 +307,7 @@ static void __skbq_drop_pending_skb(struct morse_skbq *mq, struct sk_buff *skb,
 		struct ieee80211_sta *sta;
 
 		if (vif) {
+			/* Must be held while finding and dereferencing sta */
 			rcu_read_lock();
 			sta = ieee80211_find_sta(vif, hdr->addr1);
 			if (sta)
@@ -653,17 +642,19 @@ void morse_skbq_show(const struct morse_skbq *mq, struct seq_file *file)
 
 void morse_skbq_stop_tx_queues(struct morse *mors)
 {
+	int queue;
+
 	if (!mors->started)
 		return;
 
-	/* Wake/Stop mac80211 queues is not needed when using pull interface */
-	if (!mors->custom_configs.enable_airtime_fairness) {
-		int queue;
 
-		mors->debug.page_stats.queue_stop++;
-		for (queue = IEEE80211_AC_VO; queue <= IEEE80211_AC_BK; queue++)
-			ieee80211_stop_queue(mors->hw, queue);
-	}
+	/* Wake/Stop mac80211 queues is not needed when using pull interface */
+	if (mors->custom_configs.enable_airtime_fairness)
+		return;
+
+	mors->debug.page_stats.queue_stop++;
+	for (queue = IEEE80211_AC_VO; queue <= IEEE80211_AC_BK; queue++)
+		ieee80211_stop_queue(mors->hw, queue);
 
 	set_bit(MORSE_STATE_FLAG_DATA_QS_STOPPED, &mors->state_flags);
 }
@@ -679,6 +670,11 @@ void morse_skbq_may_wake_tx_queues(struct morse *mors)
 	bool could_wake;
 
 	if (!mors->started)
+		return;
+
+
+	/* Wake/Stop mac80211 queues is not needed when using pull interface */
+	if (mors->custom_configs.enable_airtime_fairness)
 		return;
 
 	could_wake = true;
@@ -697,11 +693,8 @@ void morse_skbq_may_wake_tx_queues(struct morse *mors)
 	if (!could_wake)
 		return;
 
-	/* Wake/Stop mac80211 queues is not needed when using pull interface */
-	if (!mors->custom_configs.enable_airtime_fairness) {
-		for (queue = IEEE80211_AC_VO; queue <= IEEE80211_AC_BK; queue++)
-			ieee80211_wake_queue(mors->hw, queue);
-	}
+	for (queue = IEEE80211_AC_VO; queue <= IEEE80211_AC_BK; queue++)
+		ieee80211_wake_queue(mors->hw, queue);
 
 	clear_bit(MORSE_STATE_FLAG_DATA_QS_STOPPED, &mors->state_flags);
 }
@@ -1186,7 +1179,6 @@ static int __skbq_data_tx_finish(struct morse_skbq *mq, struct sk_buff *skb,
 				 struct morse_skb_tx_status *tx_sts)
 {
 	struct morse *mors = mq->mors;
-	struct ieee80211_hdr *hdr = (struct ieee80211_hdr *)skb->data;
 
 	if (morse_skbq_mon)
 		morse_skbq_mon_adjust(mors, skb, 0);
@@ -1196,10 +1188,7 @@ static int __skbq_data_tx_finish(struct morse_skbq *mq, struct sk_buff *skb,
 	/* Workaround Linux */
 	__skbq_qosnullfunc_to_nullfunc(skb);
 
-	if (ieee80211_is_s1g_beacon(hdr->frame_control))
-		morse_mac_ecsa_beacon_tx_done(mors, skb);
-
-	morse_mac_process_bcn_change_seq_tx_finish(mors, skb);
+	morse_mac_process_tx_finish(mors, skb);
 
 	if (mors->hw->conf.flags & IEEE80211_CONF_MONITOR)
 		dev_kfree_skb(skb);
@@ -1340,7 +1329,7 @@ struct sk_buff *morse_skbq_alloc_skb(struct morse_skbq *mq, unsigned int length)
 {
 	size_t offset = (length & 0x03) ? (4 - (unsigned long)(length & 3)) : 0;
 	int tx_headroom = sizeof(struct morse_buff_skb_header) +
-			mq->mors->bus_ops->bulk_alignment;
+			mq->mors->extra_tx_offset + mq->mors->bus_ops->bulk_alignment;
 	int skb_len = tx_headroom + length + offset;
 	struct sk_buff *skb;
 
@@ -1370,8 +1359,23 @@ int morse_skbq_skb_tx(struct morse_skbq *mq, struct sk_buff **skb_orig,
 
 	mors = mq->mors;
 
-	if (test_bit(MORSE_STATE_FLAG_CHIP_UNRESPONSIVE, &mors->state_flags))
+	if (test_bit(MORSE_STATE_FLAG_CHIP_UNRESPONSIVE, &mors->state_flags)) {
+		dev_kfree_skb_any(skb);
 		return -ENODEV;
+	}
+
+	if (channel == MORSE_SKB_CHAN_COMMAND) {
+		if (test_bit(MORSE_STATE_FLAG_HOST_TO_CHIP_CMD_BLOCKED, &mors->state_flags)) {
+			dev_kfree_skb_any(skb);
+			return -EPERM;
+		}
+	} else {
+		/* All other channels that go through morse_skbq_skb_tx are for TX */
+		if (test_bit(MORSE_STATE_FLAG_HOST_TO_CHIP_TX_BLOCKED, &mors->state_flags)) {
+			dev_kfree_skb_any(skb);
+			return -EPERM;
+		}
+	}
 
 	set_queued_tx_skb_expiry(skb);
 

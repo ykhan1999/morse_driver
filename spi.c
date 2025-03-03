@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -150,6 +138,9 @@ struct uaccess *morse_spi_uaccess;
 #define SPI_CLK_PERIOD_NANO_S(clk_mhz)	(1000000000 / (clk_mhz))
 
 #define SPI_DEFAULT_MAX_INTER_BLOCK_DELAY_BYTES	250
+
+/* Value to indicate that the base address for bulk/register read/writes has yet to be set */
+#define MORSE_SPI_BASE_ADDR_UNSET 0xFFFFFFFF
 
 #ifdef CONFIG_MORSE_SPI_RK3288
 static const bool is_rk3288 = true;
@@ -718,11 +709,12 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 	u8 base[4];
 	u32 calculated_addr_base = morse_spi_calculate_base_address(address, access);
 	u32 *current_addr_base = bulk ? &mspi->bulk_addr_base : &mspi->register_addr_base;
+	bool base_addr_is_unset = (*current_addr_base == MORSE_SPI_BASE_ADDR_UNSET);
 	u8 func_to_use = bulk ? SPI_SDIO_FUNC_2 : SPI_SDIO_FUNC_1;
 	struct spi_device *spi = mspi->spi;
 	struct morse *mors = spi_get_drvdata(spi);
 
-	if ((*current_addr_base) == calculated_addr_base)
+	if ((*current_addr_base) == calculated_addr_base && !base_addr_is_unset)
 		return ret;
 
 	base[0] = (u8)((address & 0x00FF0000) >> 16);
@@ -730,19 +722,22 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 	base[2] = access & 0x3;	/* 1, 2 or 4 byte access */
 
 	/* Write them as single bytes for now */
-	if (base[0] != (u8)(((*current_addr_base) & 0x00FF0000) >> 16)) {
+	if (base_addr_is_unset ||
+	    (base[0] != (u8)(((*current_addr_base) & 0x00FF0000) >> 16))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[0], MORSE_REG_ADDRESS_WINDOW_0);
 		if (ret)
 			goto err;
 	}
 
-	if (base[1] != (u8)(((*current_addr_base) & 0xFF000000) >> 24)) {
+	if (base_addr_is_unset ||
+	    (base[1] != (u8)(((*current_addr_base) & 0xFF000000) >> 24))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[1], MORSE_REG_ADDRESS_WINDOW_1);
 		if (ret)
 			goto err;
 	}
 
-	if (base[2] != (u8)(((*current_addr_base) & 0x3))) {
+	if (base_addr_is_unset ||
+	    (base[2] != (u8)(((*current_addr_base) & 0x3)))) {
 		ret = morse_spi_cmd52(mspi, func_to_use, base[2], MORSE_REG_ADDRESS_CONFIG);
 		if (ret)
 			goto err;
@@ -752,7 +747,7 @@ static int morse_spi_set_func_address_base(struct morse_spi *mspi, u32 address, 
 	return ret;
 
 err:
-	*current_addr_base = 0;
+	*current_addr_base = MORSE_SPI_BASE_ADDR_UNSET;
 	MORSE_SPI_ERR(mors, "%s failed (errno=%d)\n", __func__, ret);
 
 	return ret;
@@ -786,8 +781,8 @@ static int morse_spi_get_func(struct morse_spi *mspi, u32 address, ssize_t size,
 
 static void morse_spi_reset_base_address(struct morse_spi *mspi)
 {
-	mspi->bulk_addr_base = 0;
-	mspi->register_addr_base = 0;
+	mspi->bulk_addr_base = MORSE_SPI_BASE_ADDR_UNSET;
+	mspi->register_addr_base = MORSE_SPI_BASE_ADDR_UNSET;
 }
 
 static int morse_spi_mem_read(struct morse_spi *mspi, u32 address, u8 *data, u32 size)
@@ -932,21 +927,24 @@ static int morse_spi_write_until_done(struct morse_spi *spi, u32 address,
 	return bytes_written;
 }
 
-static int morse_spi_dm_write(struct morse *mors, u32 address, const u8 *data, u32 len)
+static int morse_spi_dm_write(struct morse *mors, u32 address, const u8 *data, int len)
 {
 	int ret;
 	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
-	u32 remaining = len;
-	u32 offset = 0;
+	int remaining = len;
+	int offset = 0;
 
-	while (remaining) {
+	if (WARN_ON(len < 0))
+		return -EINVAL;
+
+	while (remaining > 0) {
 		/*
 		 * We can only write up to the end of a single window in
 		 * each write operation.
 		 */
 		u32 window_end = (address + offset) | ~MORSE_SDIO_RW_ADDR_BOUNDARY_MASK;
 
-		len = min(remaining, window_end + 1 - address - offset);
+		len = min(remaining, (int)(window_end + 1 - address - offset));
 		ret = morse_spi_write_until_done(mspi, address + offset,
 						 (ssize_t)len, (u8 *)(data + offset));
 		if (ret != len)
@@ -984,21 +982,24 @@ static int morse_spi_read_until_done(struct morse_spi *spi, u32 address,
 	return bytes_read;
 }
 
-static int morse_spi_dm_read(struct morse *mors, u32 address, u8 *data, u32 len)
+static int morse_spi_dm_read(struct morse *mors, u32 address, u8 *data, int len)
 {
 	int ret;
 	struct morse_spi *mspi = (struct morse_spi *)mors->drv_priv;
-	u32 remaining = len;
-	u32 offset = 0;
+	int remaining = len;
+	int offset = 0;
 
-	while (remaining) {
+	if (WARN_ON(len < 0))
+		return -EINVAL;
+
+	while (remaining > 0) {
 		/*
 		 * We can only read up to the end of a single window in
 		 * each read operation.
 		 */
 		u32 window_end = (address + offset) | ~MORSE_SDIO_RW_ADDR_BOUNDARY_MASK;
 
-		len = min(remaining, window_end + 1 - address - offset);
+		len = min(remaining, (int)(window_end + 1 - address - offset));
 		ret = morse_spi_read_until_done(mspi, address + offset,
 						(ssize_t)len, data + offset);
 		if (ret != len)
@@ -1323,9 +1324,14 @@ static int morse_spi_probe(struct spi_device *spi)
 	}
 
 	/* setting gpio pin configs from device tree */
-	morse_of_probe(&spi->dev, mors->cfg, morse_spi_of_match);
+	if (morse_of_probe(&spi->dev, mors->cfg, morse_spi_of_match) < 0)
+		goto err_cfg;
 
-	mors->cfg->mm_ps_gpios_supported = true;
+	if (mors->cfg->mm_spi_irq_gpio < 0) {
+		MORSE_SPI_ERR(mors, "Required property spi-irq-gpios not found in device tree\n");
+		goto err_cfg;
+	}
+
 	ret = morse_spi_reg32_read(mors, MORSE_REG_CHIP_ID(mors), &mors->chip_id);
 	if (ret) {
 		MORSE_SPI_ERR(mors, "failed to read chip id: %d\n", ret);

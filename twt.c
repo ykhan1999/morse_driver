@@ -1,19 +1,7 @@
 /*
  * Copyright 2022-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -181,7 +169,7 @@ static void morse_twt_tx_queue_purge(struct morse *mors, struct morse_twt *twt, 
 static void morse_twt_to_install_queue_purge(struct morse *mors, struct morse_twt *twt, u8 *addr)
 {
 	MORSE_TWT_DBG(mors, "Purging install queue\n");
-	morse_twt_queue_purge(mors, &twt->to_install, addr, NULL);
+	morse_twt_queue_purge(mors, &twt->sta_vif.to_install_uninstall, addr, NULL);
 }
 
 void morse_twt_dump_wake_interval_tree(struct seq_file *file, struct morse_vif *mors_vif)
@@ -335,6 +323,129 @@ static struct morse_twt_sta *morse_twt_get_sta(struct morse *mors,
 	return NULL;
 }
 
+/**
+ * morse_mac_send_twt_action_frame() - Sends a TWT setup/teardown action frames
+ *
+ * @mors    Morse device
+ * @vif     The mac80211 VIF.
+ * @twt_tx  The data for the TWT IE.
+ * @dest_addr Destination Address
+ * @dialog_token Dialog Token to be used in action frame
+ * @is_twt_setup True if TWT setup frame or TWT teardown frame
+ *
+ * @return 0 on success, else error code.
+ */
+static int morse_mac_send_twt_action_frame(struct morse *mors,
+			struct ieee80211_vif *vif, struct morse_twt_event *twt_tx,
+			const u8 *dest_addr, u8 dialog_token, bool is_twt_setup)
+{
+	struct sk_buff *skb;
+	struct morse_dot11ah_s1g_twt_action *twt_action;
+	struct morse_skb_tx_info tx_info = { 0 };
+	struct morse_vif *mors_vif;
+	struct ieee80211_sta *sta;
+	struct morse_skbq *mq;
+	int ret;
+	int twt_ie_size = is_twt_setup ? (morse_twt_get_ie_size(mors, twt_tx) + 2) : 0;
+
+	if (!vif)
+		return -EINVAL;
+
+	mors_vif = ieee80211_vif_to_morse_vif(vif);
+
+	mq = mors->cfg->ops->skbq_mgmt_tc_q(mors);
+
+	skb = morse_skbq_alloc_skb(mq, sizeof(*twt_action) + twt_ie_size);
+	if (!skb)
+		return -ENOMEM;
+
+	twt_action = (struct morse_dot11ah_s1g_twt_action *)skb->data;
+	memset(twt_action, 0, sizeof(*twt_action));
+
+	/* Must be held while finding and dereferencing sta */
+	rcu_read_lock();
+	sta = ieee80211_find_sta_by_ifaddr(mors->hw, dest_addr, vif->addr);
+	if (!sta) {
+		MORSE_ERR(mors, "%s: Couldn't find dest STA\n", __func__);
+		rcu_read_unlock();
+		ret = -EINVAL;
+		goto exit;
+	}
+
+	twt_action->frame_control =
+		cpu_to_le16(IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ACTION);
+	if (sta->mfp) {
+		if (is_sw_crypto_mode()) {
+			rcu_read_unlock();
+			MORSE_ERR_RATELIMITED(mors,
+					      "Can't send protected action frame with soft encryption\n");
+			ret = -EINVAL;
+			goto exit;
+		}
+		twt_action->frame_control |= IEEE80211_FCTL_PROTECTED;
+		twt_action->category = WLAN_CATEGORY_S1G_PROTECTED;
+		twt_action->u.twt_action_setup.action_code = is_twt_setup ?
+						WLAN_S1G_PROTECTED_TWT_SETUP :
+						WLAN_S1G_PROTECTED_TWT_TEARDOWN;
+	} else {
+		twt_action->category = WLAN_CATEGORY_S1G_UNPROTECTED;
+		twt_action->u.twt_action_setup.action_code = is_twt_setup ?
+			WLAN_S1G_TWT_SETUP : WLAN_S1G_TWT_TEARDOWN;
+	}
+
+	memcpy(twt_action->da, dest_addr, ETH_ALEN);
+	memcpy(twt_action->sa, vif->addr, ETH_ALEN);
+	memcpy(twt_action->bssid, vif->bss_conf.bssid, ETH_ALEN);
+
+	morse_twt_dump_event(mors, twt_tx);
+
+	if (twt_ie_size > 0)
+		morse_dot11_insert_ie(twt_action->u.twt_action_setup.variable,
+				(u8 *)&twt_tx->setup.agr_data->control,
+				WLAN_EID_S1G_TWT,
+				twt_ie_size - 2);
+
+	if (is_twt_setup)
+		twt_action->u.twt_action_setup.dialog_token = dialog_token;
+	else
+		twt_action->u.twt_action_teardown.flow = twt_tx->flow_id;
+
+	IEEE80211_SKB_CB(skb)->control.vif = vif;
+
+	if (sta->mfp) {
+		/* Marking the packet as 'TX_FILTERED' will cause it
+		 * to be rescheduled internal to mac80211. After this,
+		 * the skb will go through the normal tx path.
+		 */
+		rcu_read_unlock();
+		IEEE80211_SKB_CB(skb)->flags |= IEEE80211_TX_STAT_TX_FILTERED;
+		ieee80211_tx_status(mors->hw, skb);
+		return 0;
+	}
+
+	morse_mac_fill_tx_info(mors, &tx_info, skb, vif,
+				mors->custom_configs.channel_info.op_bw_mhz, sta);
+
+	rcu_read_unlock();
+
+	ret = morse_skbq_skb_tx(mq, &skb, &tx_info, MORSE_SKB_CHAN_MGMT);
+	if (ret) {
+		MORSE_ERR(mors, "%s: failed to send TWT action frame\n", __func__);
+		goto exit;
+	} else {
+		MORSE_TWT_DBG(mors,
+			"TWT action %s frame sent to addr: %pM VIF %u, flow id %u\n",
+			is_twt_setup ? "SETUP" : "TEARDOWN",
+			dest_addr, mors_vif->id, twt_tx->flow_id);
+	}
+
+	return 0;
+
+exit:
+	morse_mac_skb_free(mors, skb);
+	return ret;
+}
+
 static int morse_twt_dequeue_tx_response(struct morse *mors,
 					 struct morse_vif *mors_vif, struct morse_twt_event *tx)
 {
@@ -417,8 +528,11 @@ int morse_twt_get_ie_size(struct morse *mors, struct morse_twt_event *event)
 {
 	struct morse_twt_agreement_data *agr_data;
 
-	if (!mors || !event || event->type != MORSE_TWT_EVENT_SETUP || !event->setup.agr_data)
+	if (!mors || !event || (event->type == MORSE_TWT_EVENT_SETUP && !event->setup.agr_data))
 		return -EINVAL;
+
+	if (event->type == MORSE_TWT_EVENT_TEARDOWN)
+		return 0;
 
 	agr_data = event->setup.agr_data;
 
@@ -519,8 +633,10 @@ static struct morse_twt_sta *morse_twt_add_sta(struct morse *mors, struct morse_
 		return NULL;
 
 	ether_addr_copy(sta->addr, addr);
+	sta->dialog_token = 0;
+	sta->action_is_pending = false;
 
-	/* By initalising these agreements as list heads we can use list_empty() to see if they are
+	/* By initializing these agreements as list heads we can use list_empty() to see if they are
 	 * in a wake interval list or not.
 	 */
 	for (i = 0; i < MORSE_TWT_AGREEMENTS_MAX_PER_STA; i++)
@@ -532,14 +648,14 @@ static struct morse_twt_sta *morse_twt_add_sta(struct morse *mors, struct morse_
 }
 
 /**
- * morse_twt_agreement_remove() -	Removes an agreement from a wake_interval list. Will also
+ * morse_twt_agreement_remove() - Removes an agreement from a wake_interval list. Will also
  *					remove the wake interval list entry if the list becomes
  *					empty.
  *
- * @mors	The morse chip struct.
- * @agr		The TWT agreement.
+ * @mors	Morse device
+ * @agr		The TWT agreement
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_agreement_remove(struct morse *mors, struct morse_twt_agreement *agr)
 {
@@ -575,16 +691,18 @@ static int morse_twt_agreement_remove(struct morse *mors, struct morse_twt_agree
 /**
  * morse_twt_sta_remove() - Removes a station from the TWT station list.
  *
- * @mors	The morse chip struct.
+ * @mors	Morse device
  * @twt		The TWT struct.
  * @sta		The TWT station list entry.
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_sta_remove(struct morse *mors,
 				struct morse_twt *twt, struct morse_twt_sta *sta)
 {
 	int i;
+	struct morse_vif *mors_vif = morse_twt_to_morse_vif(twt);
+	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
 
 	if (!mors || !twt)
 		return -EINVAL;
@@ -598,6 +716,11 @@ static int morse_twt_sta_remove(struct morse *mors,
 	for (i = 0; i < MORSE_TWT_AGREEMENTS_MAX_PER_STA; i++) {
 		MORSE_TWT_DBG(mors, "Remove TWT agreement %u\n", i);
 		morse_twt_agreement_remove(mors, &sta->agreements[i]);
+	}
+	/* Clear STA VIF */
+	if (vif->type == NL80211_IFTYPE_STATION) {
+		twt->sta_vif.active_agreement_bitmap = 0;
+		morse_twt_to_install_queue_purge(mors, twt, sta->addr);
 	}
 
 	/* Remove the agreements from the sta list and purge queues. */
@@ -623,10 +746,10 @@ int morse_twt_sta_remove_addr(struct morse *mors, struct morse_vif *mors_vif, u8
 /**
  * morse_twt_sta_remove_all() - Removes all of the stations from the TWT station list.
  *
- * @mors	The morse chip struct.
+ * @mors	Morse device
  * @twt		The TWT struct.
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_sta_remove_all(struct morse *mors, struct morse_twt *twt)
 {
@@ -650,12 +773,12 @@ static int morse_twt_sta_remove_all(struct morse *mors, struct morse_twt *twt)
  *					empty. Will remove the station from the TWT station entry
  *					list if empty.
  *
- * @mors	The morse chip struct.
+ * @mors	Morse device
  * @twt		The TWT struct.
  * @sta		The TWT station list entry containing the agreement.
  * @flow_id	The flow ID of the TWT agreement.
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_sta_agreement_remove(struct morse *mors,
 					  struct morse_twt *twt,
@@ -702,11 +825,11 @@ static int morse_twt_sta_agreement_add(struct morse *mors,
  * morse_twt_agreement_wake_interval_get() -	Get the wake interval list head. Creates one if it
  *						doesn't exits already.
  *
- * @mors		The morse chip struct.
- * @twt			The TWT struct.
- * @wake_interval_us	The wake interval (us) to search for.
+ * @mors		Morse device
+ * @twt			The TWT struct
+ * @wake_interval_us	The wake interval (us) to search for
  *
- * Return:		A wake interval head struct on success otherwise NULL.
+ * @return A wake interval head struct on success otherwise NULL.
  */
 static struct morse_twt_wake_interval *morse_twt_agreement_wake_interval_get(struct morse *mors,
 									     struct morse_twt *twt,
@@ -773,11 +896,11 @@ static struct morse_twt_wake_interval *morse_twt_agreement_wake_interval_get(str
 /**
  * morse_twt_agreement_wake_interval_add() -	Adds an agreement to a wake interval list.
  *
- * @mors	The morse chip struct.
- * @twt		The TWT struct.
- * @agr		The agreement to insert.
+ * @mors	Morse device
+ * @twt		The TWT struct
+ * @agr		The agreement to insert
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_agreement_wake_interval_add(struct morse *mors,
 						 struct morse_twt *twt,
@@ -874,12 +997,12 @@ static int morse_twt_agreement_wake_interval_add(struct morse *mors,
  *				parameters are copied back into the event message which is then used
  *				to fill the TWT IE with an accept.
  *
- * @mors	The morse chip struct.
- * @twt		The TWT struct.
- * @sta		STA TWT data.
+ * @mors	Morse device
+ * @twt		The TWT struct
+ * @sta		STA TWT data
  * @event	The originating event to be recycled into an accept message in the tx queue.
  *
- * Return:	0 on success otherwise relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_send_accept(struct morse *mors,
 				 struct morse_twt *twt,
@@ -888,11 +1011,15 @@ static int morse_twt_send_accept(struct morse *mors,
 	struct morse_twt_agreement_data *event_agr_data;
 	struct morse_twt_agreement *sta_agr;
 	struct morse_twt_agreement_data *sta_agr_data;
+	struct morse_vif *mors_vif;
+	struct ieee80211_vif *vif;
 
 	if (!mors || !event || !event->setup.agr_data || !sta)
 		return -EINVAL;
 
 	event_agr_data = event->setup.agr_data;
+	mors_vif = container_of((void *)twt, struct morse_vif, twt);
+	vif = morse_vif_to_ieee80211_vif(mors_vif);
 
 	sta_agr = &sta->agreements[event->flow_id];
 	sta_agr_data = &sta_agr->data;
@@ -908,25 +1035,65 @@ static int morse_twt_send_accept(struct morse *mors,
 				sta_agr_data->wake_interval_us, sta_agr_data->wake_duration_us);
 	/* Copy changes back to the accept message. */
 	memcpy(event_agr_data, sta_agr_data, sizeof(*event_agr_data));
-	list_add_tail(&event->list, &twt->tx);
-	MORSE_TWT_DBG(mors, "TWT Accept added to queue for %pM (Flow ID %u)\n",
-		  event->addr, event->flow_id);
+
+	/* If event was triggered with an action frame respond with setup action frame,
+	 * if it's with assoc request queue it, assoc response will include TWT IE
+	 */
+	if (sta->action_is_pending) {
+		morse_mac_send_twt_action_frame(mors, vif, event, sta->addr,
+				sta->dialog_token, true);
+		MORSE_TWT_DBG(mors,
+			"TWT Accept responded for dialog token %d to %pM (Flow ID %u)\n",
+			sta->dialog_token, event->addr, event->flow_id);
+		sta->action_is_pending = false;
+		morse_twt_enter_state(mors, &mors_vif->twt, sta, event,
+						    MORSE_TWT_STATE_AGREEMENT);
+		morse_twt_purge_event(mors, event);
+	} else {
+		list_add_tail(&event->list, &twt->tx);
+		MORSE_TWT_DBG(mors, "TWT Accept added to queue for %pM (Flow ID %u)\n",
+			event->addr, event->flow_id);
+	}
 	return 0;
 }
 
 /* Takes ownership of the event (this allows recycling of the event struct). */
 static int morse_twt_send_reject(struct morse *mors,
-				 struct morse_twt *twt, struct morse_twt_event *event)
+				struct morse_twt *twt,
+				struct morse_twt_sta *sta,
+				struct morse_twt_event *event)
 {
-	if (!mors || !event)
+	struct morse_vif *mors_vif;
+	struct ieee80211_vif *vif;
+
+	if (!mors || !event || !sta)
 		return -EINVAL;
+	mors_vif = container_of((void *)twt, struct morse_vif, twt);
+	vif = morse_vif_to_ieee80211_vif(mors_vif);
 
 	/* When rejecting, the TWT parameters remain the same, except for the setup command. */
 	event->setup.cmd = TWT_SETUP_CMD_REJECT;
 	morse_twt_set_command(&event->setup.agr_data->params.req_type, event->setup.cmd);
-	list_add_tail(&event->list, &twt->tx);
-	MORSE_TWT_WARN_RATELIMITED(mors, "TWT Reject added to queue for %pM (Flow ID %u)\n",
+
+	/* If event was triggered with an action frame respond with setup action frame,
+	 * if it's with assoc request queue it, assoc response will include TWT IE
+	 */
+	if (sta->action_is_pending) {
+		morse_mac_send_twt_action_frame(mors, vif, event,
+			sta->addr, sta->dialog_token, true);
+		MORSE_TWT_DBG(mors,
+			"TWT reject responded for dialog token %d to %pM (Flow ID %u)\n",
+			sta->dialog_token, event->addr,  event->flow_id);
+		sta->action_is_pending = false;
+		morse_twt_enter_state(mors, &mors_vif->twt, sta, event,
+						    MORSE_TWT_STATE_NO_AGREEMENT);
+		morse_twt_purge_event(mors, event);
+	} else {
+		list_add_tail(&event->list, &twt->tx);
+		MORSE_TWT_DBG(mors, "TWT reject added to queue for %pM (Flow ID %u)\n",
 				   event->addr, event->flow_id);
+	}
+
 	return 0;
 }
 
@@ -961,8 +1128,8 @@ static int morse_twt_enter_state_consider_demand(struct morse *mors,
 						 struct morse_twt_sta *sta,
 						 struct morse_twt_event *event)
 {
-	/* Send reject. Don't negotiate with terrorists. */
-	return morse_twt_send_reject(mors, twt, event);
+	/* Send reject, demand is not supported */
+	return morse_twt_send_reject(mors, twt, sta, event);
 }
 
 static int morse_twt_enter_state_consider_grouping(struct morse *mors,
@@ -970,8 +1137,8 @@ static int morse_twt_enter_state_consider_grouping(struct morse *mors,
 						   struct morse_twt_sta *sta,
 						   struct morse_twt_event *event)
 {
-	/* Send reject. Don't negotiate with terrorists. */
-	return morse_twt_send_reject(mors, twt, event);
+	/* Send reject, grouping is not supported */
+	return morse_twt_send_reject(mors, twt, sta, event);
 }
 
 static int morse_twt_enter_state_agreement(struct morse *mors,
@@ -1108,10 +1275,17 @@ static int morse_twt_handle_event_in_agreement(struct morse *mors,
 			 */
 			existing_tx_event =
 			    morse_twt_peek_tx(mors, mors_vif, sta->addr, &event->flow_id);
-			if (existing_tx_event)
+			if (existing_tx_event) {
+				MORSE_TWT_WARN_RATELIMITED(mors,
+					"TWT Response pending for %pM, drop new request\n",
+					sta->addr);
 				morse_twt_purge_event(mors, event);
-			else
-				morse_twt_send_reject(mors, twt, event);
+			} else {
+				MORSE_TWT_DBG(mors,
+					"Active TWT agreement for %pM flow_id %d present, send reject\n",
+					sta->addr, event->flow_id);
+				morse_twt_send_reject(mors, twt, sta, event);
+			}
 			break;
 		}
 	case TWT_SETUP_CMD_ACCEPT:
@@ -1124,29 +1298,65 @@ static int morse_twt_handle_event_in_agreement(struct morse *mors,
 	return 0;
 }
 
-void morse_twt_install_pending_agreements(struct morse *mors, struct morse_vif *mors_vif)
+/**
+ * morse_twt_uninstall_agreement() - Uninstalls STA's TWT active agreement from chip
+ *
+ * @mors      Morse device
+ * @mors_vif  Morse virtual interface
+ * @flow_id   Flow id of TWT agreement to be uninstalled
+ *
+ * @return 0 on success, else error code
+ */
+static int morse_twt_uninstall_agreement(struct morse *mors, struct morse_vif *mors_vif, u8 flow_id)
+{
+	struct morse_cmd_remove_twt_agreement remove_twt;
+
+	remove_twt.flow_id = flow_id;
+	/* Handle the remove command in the driver for removal of any twt config data */
+	return morse_cmd_twt_remove_req(mors, &remove_twt, mors_vif->id);
+}
+
+void morse_twt_process_pending_cmds(struct morse *mors, struct morse_vif *mors_vif)
 {
 	struct morse_twt_event *event;
 	struct morse_twt_event *temp;
+	struct morse_twt *twt = &mors_vif->twt;
 
-	spin_lock_bh(&mors_vif->twt.lock);
-	list_for_each_entry_safe(event, temp, &mors_vif->twt.to_install, list) {
+	spin_lock_bh(&twt->lock);
+	list_for_each_entry_safe(event, temp, &twt->sta_vif.to_install_uninstall, list) {
 		/* Must unlock as we are sending a command which blocks */
-		spin_unlock_bh(&mors_vif->twt.lock);
+		spin_unlock_bh(&twt->lock);
 
-		if (!morse_cmd_twt_agreement_install_req(mors, event->setup.agr_data, mors_vif->id))
-			MORSE_TWT_INFO(mors,
-				       "Installed TWT agreement (AP: %pM, VIF: %u, Flow ID: %u)\n",
-				       event->addr, mors_vif->id, event->flow_id);
-		else
-			MORSE_TWT_WARN(mors, "Failed to install TWT agreement\n");
+		if (event->type == MORSE_TWT_EVENT_TEARDOWN) {
+			if (!morse_twt_uninstall_agreement(mors, mors_vif, event->flow_id)) {
+				/* Clear active TWT agr flag */
+				clear_bit(event->flow_id, &twt->sta_vif.active_agreement_bitmap);
+				MORSE_TWT_INFO(mors,
+						"Uninstalled TWT agreement (AP: %pM, VIF: %u, Flow ID: %u)\n",
+						event->addr, mors_vif->id, event->flow_id);
+			} else {
+				MORSE_TWT_WARN(mors, "Failed to uninstall TWT agreement\n");
+			}
+		} else if (event->type == MORSE_TWT_EVENT_SETUP) {
+			if (!morse_cmd_twt_agreement_install_req(mors,
+					event->setup.agr_data, mors_vif->id)) {
+				set_bit(event->flow_id, &twt->sta_vif.active_agreement_bitmap);
+				MORSE_TWT_INFO(mors,
+						"Installed TWT agreement (AP: %pM, VIF: %u, Flow ID: %u)\n",
+						event->addr, mors_vif->id, event->flow_id);
+			} else {
+				MORSE_TWT_WARN(mors, "Failed to install TWT agreement\n");
+			}
+		} else {
+			MORSE_TWT_WARN(mors, "Invalid TWT event type :%d\n", event->type);
+		}
 
-		spin_lock_bh(&mors_vif->twt.lock);
+		spin_lock_bh(&twt->lock);
 
 		/* Cleanup event. */
 		morse_twt_purge_event(mors, event);
 	}
-	spin_unlock_bh(&mors_vif->twt.lock);
+	spin_unlock_bh(&twt->lock);
 }
 
 void morse_twt_queue_event(struct morse *mors,
@@ -1167,24 +1377,30 @@ void morse_twt_queue_event(struct morse *mors,
 				  required, purge if invalid. If further processing is not required
 				  this function will consume the event.
  *
- * @mors	The morse chip struct.
- * @twt		The morse twt struct.
- * @event	The event to preprocess.
+ * @mors	Morse device
+ * @twt		The morse twt struct
+ * @event	The event to preprocess
  *
- * Return true if further processing is required otherwise false if the event has been consumed.
+ * @return true if further processing is required otherwise false if the event has been consumed.
  */
 static bool morse_twt_preprocess_event(struct morse *mors,
 				       struct morse_twt *twt, struct morse_twt_event *event)
 {
+	struct morse_vif *mors_vif = container_of((void *)twt, struct morse_vif, twt);
+	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
+
 	if (!event)
 		return false;
 
 	morse_twt_dump_event(mors, event);
 
-	if (event->type != MORSE_TWT_EVENT_SETUP) {
+	if (event->type != MORSE_TWT_EVENT_SETUP && event->type != MORSE_TWT_EVENT_TEARDOWN) {
 		morse_twt_purge_event(mors, event);
 		return false;
 	}
+
+	if (event->type == MORSE_TWT_EVENT_TEARDOWN && event->teardown.teardown)
+		return true;
 
 	switch (event->setup.cmd) {
 	case TWT_SETUP_CMD_REQUEST:
@@ -1205,10 +1421,14 @@ static bool morse_twt_preprocess_event(struct morse *mors,
 		if (twt->requester) {
 			MORSE_TWT_DBG(mors, "%s: Received a TWT response: %u\n",
 				      __func__, event->setup.cmd);
-			/* Queue installing TWT agreement to chip. Requires STA state change to
-			 * associated first.
+			/* Queue installing TWT agreement to chip. If STA is already associated,
+			 * and event is from action frame processing, schedule cmd_work to install
+			 * TWT agreement. If STA is not associated yet, it requires STA state to
+			 * change to AUTHORIZED, for installing TWT agreement.
 			 */
-			list_add_tail(&event->list, &twt->to_install);
+			list_add_tail(&event->list, &twt->sta_vif.to_install_uninstall);
+			if (morse_mac_is_sta_vif_associated(vif))
+				schedule_work(&twt->sta_vif.cmd_work);
 			return false;
 		}
 
@@ -1227,6 +1447,36 @@ static bool morse_twt_preprocess_event(struct morse *mors,
 	return false;
 }
 
+/**
+ * morse_twt_handle_event_teardown() - Handle TWT teardown event
+ *
+ * @mors      Morse device
+ * @mors_vif  Morse virtual interface
+ * @twt_sta   The TWT station list entry
+ * @event     TWT event
+ *
+ * @return 0 on success, else error code
+ */
+static int morse_twt_handle_event_teardown(struct morse *mors,
+				struct morse_vif *mors_vif,
+				struct morse_twt_sta *twt_sta,
+				struct morse_twt_event *event)
+{
+	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
+	int ret;
+
+	/* Teardown processing on AP */
+	if (vif->type == NL80211_IFTYPE_AP) {
+		ret = morse_twt_enter_state(mors, &mors_vif->twt, twt_sta, event,
+						    MORSE_TWT_STATE_NO_AGREEMENT);
+	} else {
+		MORSE_TWT_ERR(mors, "%s: invalid VIF type %d\n", __func__, vif->type);
+		ret = -EINVAL;
+	}
+	morse_twt_purge_event(mors, event);
+	return ret;
+}
+
 void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr)
 {
 	struct morse *mors = morse_vif_to_morse(mors_vif);
@@ -1235,9 +1485,9 @@ void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr)
 	struct morse_twt_event *event;
 
 	if (addr)
-		MORSE_TWT_DBG(mors, "%s %pM\n", __func__, addr);
+		MORSE_TWT_DBG(mors, "%s: %pM\n", __func__, addr);
 	else
-		MORSE_TWT_DBG(mors, "%s no addr filter\n", __func__);
+		MORSE_TWT_DBG(mors, "%s: no addr filter\n", __func__);
 
 	spin_lock_bh(&twt->lock);
 
@@ -1253,35 +1503,43 @@ void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr)
 			/* Deal with received requests. */
 			sta = morse_twt_get_sta(mors, mors_vif, event->addr);
 
-			if (!sta)
-				sta = morse_twt_add_sta(mors, twt, event->addr);
+			if (event->type == MORSE_TWT_EVENT_TEARDOWN) {
+				morse_twt_handle_event_teardown(mors, mors_vif, sta, event);
+			} else {
+				/* Setup TWT event */
+				if (!sta)
+					sta = morse_twt_add_sta(mors, twt, event->addr);
 
-			if (!sta) {
-				MORSE_TWT_ERR(mors, "Unable to allocate TWT STA (%pM) for event\n",
-					      event->addr);
+				if (!sta) {
+					MORSE_TWT_ERR(mors,
+						"Unable to allocate TWT STA (%pM) for event\n",
+						event->addr);
 
-				/* Perhaps we can try again later. */
-				schedule_work(&twt->work);
-				spin_unlock_bh(&twt->lock);
-				return;
-			}
-
-			switch (sta->agreements[event->flow_id].state) {
-			case MORSE_TWT_STATE_NO_AGREEMENT:
-				morse_twt_handle_event_in_no_agreement(mors, twt, sta, event);
-				break;
-			case MORSE_TWT_STATE_CONSIDER_REQUEST:
-			case MORSE_TWT_STATE_CONSIDER_SUGGEST:
-			case MORSE_TWT_STATE_CONSIDER_DEMAND:
-			case MORSE_TWT_STATE_CONSIDER_GROUPING:
-				morse_twt_handle_event_in_consider(mors, twt, sta, event);
-				break;
-			case MORSE_TWT_STATE_AGREEMENT:
-				morse_twt_handle_event_in_agreement(mors, mors_vif,
-								    twt, sta, event);
-				break;
-			default:
-				morse_twt_purge_event(mors, event);
+					/* Perhaps we can try again later. */
+					schedule_work(&twt->work);
+					spin_unlock_bh(&twt->lock);
+					return;
+				}
+				MORSE_TWT_DBG(mors, "STA agreement state:%d event:%d\n",
+					sta->agreements[event->flow_id].state, event->setup.cmd);
+				switch (sta->agreements[event->flow_id].state) {
+				case MORSE_TWT_STATE_NO_AGREEMENT:
+					morse_twt_handle_event_in_no_agreement(mors,
+								twt, sta, event);
+					break;
+				case MORSE_TWT_STATE_CONSIDER_REQUEST:
+				case MORSE_TWT_STATE_CONSIDER_SUGGEST:
+				case MORSE_TWT_STATE_CONSIDER_DEMAND:
+				case MORSE_TWT_STATE_CONSIDER_GROUPING:
+					morse_twt_handle_event_in_consider(mors, twt, sta, event);
+					break;
+				case MORSE_TWT_STATE_AGREEMENT:
+					morse_twt_handle_event_in_agreement(mors, mors_vif,
+										twt, sta, event);
+					break;
+				default:
+					morse_twt_purge_event(mors, event);
+				}
 			}
 		}
 
@@ -1299,14 +1557,206 @@ void morse_twt_handle_event_work(struct work_struct *work)
 }
 
 /**
+ * morse_mac_process_twt_ie() - Process TWT setup IE
+ *
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
+ * @element	   IE to be processed
+ * @src_addr   Source address of frame containing TWT IE
+ *
+ */
+static void morse_mac_process_twt_ie(struct morse *mors, struct morse_vif *mors_vif,
+				     struct ie_element *element, const u8 *src_addr)
+{
+	int ret;
+	struct morse_twt_event *event = kmalloc(sizeof(*event), GFP_ATOMIC);
+
+	if (!event)
+		return;
+
+	ret = morse_twt_parse_ie(mors_vif, element, event, src_addr);
+
+	if (!ret) {
+		morse_twt_dump_event(mors, event);
+		MORSE_TWT_DBG(mors, "Parsed TWT IE from %pM and queued event\n", src_addr);
+		/* Add event to queue. */
+		morse_twt_queue_event(mors, mors_vif, event);
+	} else {
+		MORSE_TWT_WARN(mors, "Failed to parse TWT IE\n");
+		kfree(event);
+	}
+}
+
+/**
+ * morse_mac_process_twt_teardown() - Process TWT teardown action frame
+ *
+ * @mors    Morse device
+ * @vif     The mac80211 VIF
+ * @mgmt    TWT teardown action frame
+ * @src_addr Source address of TWT action frame
+ *
+ * @return 0 on success, else error code.
+ */
+static int morse_mac_process_twt_teardown(struct morse *mors,
+			struct ieee80211_vif *vif, struct morse_dot11ah_s1g_twt_action *mgmt,
+			u8 *src_addr)
+{
+	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
+	struct morse_twt_sta *twt_sta;
+	struct morse_twt_event *remove_twt_evt;
+	struct morse_twt *twt = &mors_vif->twt;
+
+	if (vif->type == NL80211_IFTYPE_AP) {
+		/* Check for valid TWT STA context */
+		twt_sta = morse_twt_get_sta(mors, mors_vif, src_addr);
+		if (!twt_sta) {
+			MORSE_TWT_WARN_RATELIMITED(mors, "%s: Couldn't get STA\n", __func__);
+			return -ENODEV;
+		}
+	}
+
+	remove_twt_evt = kmalloc(sizeof(*remove_twt_evt), GFP_ATOMIC);
+	INIT_LIST_HEAD(&remove_twt_evt->list);
+	remove_twt_evt->type = MORSE_TWT_EVENT_TEARDOWN;
+	remove_twt_evt->teardown.teardown = true;
+	remove_twt_evt->flow_id = mgmt->u.twt_action_teardown.flow & TWT_TEARDOWN_FLOW_ID_MASK;
+	ether_addr_copy(remove_twt_evt->addr, src_addr);
+
+	/* Add event to queue. */
+	morse_twt_queue_event(mors, mors_vif, remove_twt_evt);
+	schedule_work(&twt->work);
+
+	return 0;
+}
+
+/**
+ * morse_mac_process_twt_action_frame() - Process TWT setup/teardown action frames
+ *
+ * @mors    Morse device
+ * @vif     The mac80211 VIF.
+ * @mgmt    TWT action frame
+ * @twt_ie  The data for the TWT IE.
+ * @src_addr Source address of TWT action frame
+ *
+ * @return -EACCESS to avoid forwarding, 0 to forward to mac80211, else error code.
+ */
+static int morse_mac_process_twt_action_frame(struct morse *mors,
+			struct ieee80211_vif *vif, struct morse_dot11ah_s1g_twt_action *mgmt,
+			struct ie_element *twt_ie, const u8 *src_addr)
+{
+	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
+	struct morse_twt *twt = &mors_vif->twt;
+	struct morse_twt_sta *twt_sta;
+
+	if (morse_dot11_is_twt_setup_action_frame(mgmt)) {
+		MORSE_TWT_DBG(mors, "%s: Rx TWT action SETUP frame\n", __func__);
+		morse_mac_process_twt_ie(mors, mors_vif, twt_ie, src_addr);
+
+		spin_lock_bh(&twt->lock);
+		twt_sta = morse_twt_get_sta(mors, mors_vif, (u8 *)src_addr);
+		if (!twt_sta)
+			twt_sta = morse_twt_add_sta(mors, twt, (u8 *)src_addr);
+
+		if (!twt_sta) {
+			MORSE_TWT_ERR(mors,
+				"%s Unable to allocate TWT STA (%pM) for action frame\n",
+				__func__, src_addr);
+			spin_unlock_bh(&twt->lock);
+			return -ENOMEM;
+		}
+		twt_sta->dialog_token = mgmt->u.twt_action_setup.dialog_token;
+		twt_sta->action_is_pending = true;
+		spin_unlock_bh(&twt->lock);
+		schedule_work(&twt->work);
+		/* Consume TWT action frame, do not forward to mac80211 */
+		return -EACCES;
+	} else if (morse_dot11_is_twt_teardown_action_frame(mgmt)) {
+		MORSE_TWT_DBG(mors, "%s: Rx TWT action TEARDOWN frame\n", __func__);
+		morse_mac_process_twt_teardown(mors, vif, mgmt, (u8 *)src_addr);
+		/* Consume TWT action frame, do not forward to mac80211 */
+		return -EACCES;
+	}
+
+	return 0;
+}
+
+int morse_mac_process_rx_twt_mgmt(struct morse *mors, struct ieee80211_vif *vif,
+			const struct sk_buff *skb, struct dot11ah_ies_mask *ies_mask)
+{
+	struct ieee80211_mgmt *mgmt;
+	struct morse_vif *mors_vif;
+	struct morse_dot11ah_s1g_twt_action *twt_action;
+	int ret = 0;
+
+	if (!mors || !vif)
+		return -EINVAL;
+	mors_vif = ieee80211_vif_to_morse_vif(vif);
+
+	mgmt = (struct ieee80211_mgmt *)skb->data;
+
+	if (is_assoc_frame(mgmt->frame_control) && ies_mask->ies[WLAN_EID_S1G_TWT].ptr) {
+		morse_mac_process_twt_ie(mors,
+			mors_vif,
+			&ies_mask->ies[WLAN_EID_S1G_TWT],
+			mgmt->sa);
+	} else if (ieee80211_is_action(mgmt->frame_control)) {
+		bool is_protected = ieee80211_has_protected(mgmt->frame_control);
+
+		twt_action = (struct morse_dot11ah_s1g_twt_action *)(skb->data +
+					   (is_protected ? IEEE80211_CCMP_HDR_LEN : 0));
+		ret = morse_mac_process_twt_action_frame(mors, vif, twt_action,
+					&ies_mask->ies[WLAN_EID_S1G_TWT], mgmt->sa);
+	}
+
+	return ret;
+}
+
+void morse_mac_process_twt_action_tx_finish(struct morse *mors, struct ieee80211_vif *vif,
+			const struct sk_buff *skb)
+{
+	struct morse_dot11ah_s1g_twt_action *mgmt;
+	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
+	struct morse_twt_event *remove_twt_evt;
+	struct morse_twt *twt = &mors_vif->twt;
+	u8 flow_id;
+	u8 action_code;
+
+	mgmt = (struct morse_dot11ah_s1g_twt_action *)skb->data;
+	action_code = mgmt->u.twt_action_setup.action_code;
+	/* Process Tx complete of TWT teardown action frame */
+	if (action_code == WLAN_S1G_PROTECTED_TWT_TEARDOWN ||
+			action_code == WLAN_S1G_TWT_TEARDOWN) {
+		MORSE_TWT_DBG(mors, "%s: TWT action TEARDOWN frame Tx complete, remove TWT\n",
+			__func__);
+
+		flow_id = mgmt->u.twt_action_teardown.flow & TWT_TEARDOWN_FLOW_ID_MASK;
+
+		remove_twt_evt = kmalloc(sizeof(*remove_twt_evt), GFP_ATOMIC);
+		INIT_LIST_HEAD(&remove_twt_evt->list);
+		remove_twt_evt->type = MORSE_TWT_EVENT_TEARDOWN;
+		remove_twt_evt->teardown.teardown = true;
+		remove_twt_evt->flow_id =
+			mgmt->u.twt_action_teardown.flow & TWT_TEARDOWN_FLOW_ID_MASK;
+		ether_addr_copy(remove_twt_evt->addr, mgmt->da);
+
+		/* Add event to the to_install_uninstall list. */
+		spin_lock_bh(&twt->lock);
+		MORSE_TWT_DBG(mors, "%s:  event %pM", __func__, remove_twt_evt->addr);
+		list_add_tail(&remove_twt_evt->list, &twt->sta_vif.to_install_uninstall);
+		spin_unlock_bh(&twt->lock);
+		schedule_work(&twt->sta_vif.cmd_work);
+	}
+}
+
+/**
  * morse_twt_requester_send() - Sends a setup command as a requester
  *
- * @mors	The morse chip struct.
- * @mors_vif	The morse VIF.
- * @data	The data for the TWT IE.
- * @cmd		The setup command to be sent, must match the data.
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
+ * @data       The data for the TWT IE.
+ * @cmd        The setup command to be sent, must match the data.
  *
- * Return:	0 on success or relevant error.
+ * @return 0 on success, else error code
  */
 static int morse_twt_requester_send(struct morse *mors, struct morse_vif *mors_vif,
 				    struct morse_twt_agreement_data *data,
@@ -1314,11 +1764,13 @@ static int morse_twt_requester_send(struct morse *mors, struct morse_vif *mors_v
 {
 	struct morse_twt *twt;
 	struct morse_twt_event *req;
+	struct ieee80211_vif *vif;
 
 	if (!mors || !mors_vif || !data)
 		return -EINVAL;
 
 	twt = &mors_vif->twt;
+	vif = morse_vif_to_ieee80211_vif(mors_vif);
 
 	/* Check to see if TWT capable and enabled. */
 	if (!twt->requester) {
@@ -1355,9 +1807,19 @@ static int morse_twt_requester_send(struct morse *mors, struct morse_vif *mors_v
 	req->setup.agr_data = data;
 	req->setup.cmd = cmd;
 
-	kfree(twt->req_event_tx);
-
-	twt->req_event_tx = (u8 *)req;
+	if (morse_mac_is_sta_vif_associated(vif)) {
+		MORSE_TWT_DBG(mors,
+			"New TWT agreement Req on VIF:%u,send TWT action for Flow ID: %u,\n",
+			mors_vif->id, req->flow_id);
+		morse_mac_send_twt_action_frame(mors, vif, req, vif->bss_conf.bssid,
+			++mors_vif->twt.dialog_token, true);
+		/* Cleanup event */
+		morse_twt_purge_event(mors, req);
+	} else {
+		/* Queue event for sending in assoc req */
+		kfree(twt->req_event_tx);
+		twt->req_event_tx = (u8 *)req;
+	}
 
 	return 0;
 }
@@ -1432,16 +1894,16 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 	u8 control;
 	int ret;
 
-	if (!ie || !ie->ptr)
-		return -EINVAL;
-
 	if (!mors_vif || !event)
 		return -EINVAL;
 
 	mors = morse_vif_to_morse(mors_vif);
-
+	if (!ie || !ie->ptr) {
+		MORSE_TWT_DBG(mors, "%s: Invalid TWT IE\n", __func__);
+		return -EINVAL;
+	}
 	if (ie->len < TWT_IE_MIN_LENGTH || ie->len > TWT_IE_MAX_LENGTH) {
-		MORSE_TWT_WARN(mors, "%s: Invalid TWT IE length: %u\n", __func__, ie->len);
+		MORSE_TWT_DBG(mors, "%s: Invalid TWT IE length: %u\n", __func__, ie->len);
 		return -EINVAL;
 	}
 
@@ -1451,15 +1913,15 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 
 	/* Return error for unsupported options. */
 	if (MORSE_TWT_CTRL_SUP(control, NEG_TYPE_BROADCAST)) {
-		MORSE_TWT_WARN(mors, "%s: TWT Broadcast not currently supported\n", __func__);
+		MORSE_TWT_DBG(mors, "%s: TWT Broadcast not currently supported\n", __func__);
 		return -EINVAL;
 	} else if (MORSE_TWT_CTRL_SUP(control, NEG_TYPE)) {
-		MORSE_TWT_WARN(mors, "%s: TWT TBTT interval negotiation not supported\n", __func__);
+		MORSE_TWT_DBG(mors, "%s: TWT TBTT interval negotiation not supported\n", __func__);
 		return -EINVAL;
 	}
 
 	if (MORSE_TWT_CTRL_SUP(control, NDP)) {
-		MORSE_TWT_WARN(mors, "%s: TWT NDP paging not currently supported\n", __func__);
+		MORSE_TWT_DBG(mors, "%s: TWT NDP paging not currently supported\n", __func__);
 		return -EINVAL;
 	}
 
@@ -1467,7 +1929,7 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 	vif = morse_vif_to_ieee80211_vif(mors_vif);
 	ret = morse_twt_validate_params(mors, vif, twt_params);
 	if (ret) {
-		MORSE_TWT_WARN(mors, "%s: Invalid TWT Params\n", __func__);
+		MORSE_TWT_DBG(mors, "%s: Invalid TWT Params\n", __func__);
 		return ret;
 	}
 
@@ -1476,9 +1938,10 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 
 	/* Copy message into its own memory and fill friendly values. */
 	event->setup.agr_data = kmalloc(sizeof(*event->setup.agr_data), GFP_ATOMIC);
-	if (!event->setup.agr_data)
+	if (!event->setup.agr_data) {
+		MORSE_TWT_WARN(mors, "%s: Failed to allocate event data\n", __func__);
 		return -ENOMEM;
-
+	}
 	agr_data = event->setup.agr_data;
 	agr_data->control = control;
 	memcpy(&agr_data->params, twt_params, sizeof(agr_data->params));
@@ -1497,6 +1960,17 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 	return 0;
 }
 
+void morse_twt_handle_cmd_work(struct work_struct *work)
+{
+	struct morse_twt_sta_vif *twt_sta_vif = container_of(work,
+			struct morse_twt_sta_vif, cmd_work);
+	struct morse_twt *twt = container_of(twt_sta_vif, struct morse_twt, sta_vif);
+	struct morse_vif *mors_vif = morse_twt_to_morse_vif(twt);
+	struct morse *mors = morse_vif_to_morse(mors_vif);
+
+	morse_twt_process_pending_cmds(mors, mors_vif);
+}
+
 int morse_twt_init(struct morse *mors)
 {
 	return 0;
@@ -1512,9 +1986,13 @@ int morse_twt_init_vif(struct morse *mors, struct morse_vif *mors_vif)
 	INIT_LIST_HEAD(&mors_vif->twt.wake_intervals);
 	INIT_LIST_HEAD(&mors_vif->twt.events);
 	INIT_LIST_HEAD(&mors_vif->twt.tx);
-	INIT_LIST_HEAD(&mors_vif->twt.to_install);
+	mors_vif->twt.dialog_token = 0;
 
 	INIT_WORK(&mors_vif->twt.work, morse_twt_handle_event_work);
+
+	INIT_WORK(&mors_vif->twt.sta_vif.cmd_work, morse_twt_handle_cmd_work);
+	mors_vif->twt.sta_vif.active_agreement_bitmap = 0;
+	INIT_LIST_HEAD(&mors_vif->twt.sta_vif.to_install_uninstall);
 
 	return 0;
 }
@@ -1528,6 +2006,7 @@ int morse_twt_finish_vif(struct morse *mors, struct morse_vif *mors_vif)
 
 	twt = &mors_vif->twt;
 
+	cancel_work_sync(&twt->sta_vif.cmd_work);
 	cancel_work_sync(&twt->work);
 	spin_lock_bh(&twt->lock);
 	morse_twt_sta_remove_all(mors, twt);
@@ -1578,6 +2057,14 @@ static int morse_twt_process_set_cmd(struct morse *mors,
 	int exponent = 0;
 	struct morse_twt_agreement_data *agreement = NULL;
 	u64 *wake_interval_us = &cmd_set_twt->set_twt_conf.wake_interval_us;
+	struct morse_twt *twt = &mors_vif->twt;
+
+	if (test_bit(cmd_set_twt->flow_id, &twt->sta_vif.active_agreement_bitmap)) {
+		MORSE_TWT_ERR(mors,
+			"TWT agreement is active for flow_id:%d, teardown before new aggr\n",
+			cmd_set_twt->flow_id);
+		return -EPERM;
+	}
 
 	agreement = kzalloc(sizeof(*agreement), GFP_KERNEL);
 
@@ -1612,15 +2099,15 @@ static int morse_twt_process_set_cmd(struct morse *mors,
 		/* Send cmd to fw */
 		agreement->params.twt = cmd_set_twt->set_twt_conf.target_wake_time;
 		ret = morse_cmd_twt_agreement_install_req(mors,
-							  agreement,
-							  le16_to_cpu(cmd_set_twt->hdr.vif_id));
+						agreement, le16_to_cpu(cmd_set_twt->hdr.vif_id));
 
 		/* If we force installation of an agreement then we must be a requester. YMMV if
 		 * something else is in conflict.
 		 */
-		if (!ret)
+		if (!ret) {
 			mors_vif->twt.requester = true;
-
+			set_bit(cmd_set_twt->flow_id, &twt->sta_vif.active_agreement_bitmap);
+		}
 		goto exit;
 	}
 
@@ -1649,11 +2136,38 @@ static int morse_twt_process_remove_cmd(struct morse *mors,
 					struct morse_vif *mors_vif,
 					struct command_twt_req *cmd_remove_twt)
 {
-	struct morse_cmd_remove_twt_agreement remove_twt;
+	struct morse_twt_event remove_twt_evt;
+	struct morse_twt *twt;
+	struct ieee80211_vif *vif;
+	int ret;
 
-	remove_twt.flow_id = cmd_remove_twt->flow_id;
-	/* Handle the remove command in the driver for removal of any twt config data */
-	return morse_cmd_twt_remove_req(mors, &remove_twt, le16_to_cpu(cmd_remove_twt->hdr.vif_id));
+	if (!mors || !mors_vif || !cmd_remove_twt)
+		return -EINVAL;
+	vif = morse_vif_to_ieee80211_vif(mors_vif);
+
+	/* Supported only for STA interface */
+	if (vif->type != NL80211_IFTYPE_STATION)
+		return -EINVAL;
+	twt = &mors_vif->twt;
+
+	if (!test_bit(cmd_remove_twt->flow_id, &twt->sta_vif.active_agreement_bitmap)) {
+		MORSE_TWT_ERR(mors, "%s: no active TWT agreement for flow id:%d\n",
+			__func__, cmd_remove_twt->flow_id);
+		return -EPERM;
+	}
+	INIT_LIST_HEAD(&remove_twt_evt.list);
+	remove_twt_evt.type = MORSE_TWT_EVENT_TEARDOWN;
+	remove_twt_evt.teardown.teardown = true;
+	remove_twt_evt.flow_id = cmd_remove_twt->flow_id;
+
+	if (morse_mac_is_sta_vif_associated(vif)) {
+		/* Wait for Tx completion to uninstall agreement */
+		ret = morse_mac_send_twt_action_frame(mors, vif,
+				&remove_twt_evt, vif->bss_conf.bssid, 0, false);
+	} else {
+		ret = morse_twt_uninstall_agreement(mors, mors_vif, cmd_remove_twt->flow_id);
+	}
+	return ret;
 }
 
 int morse_twt_initialise_agreement(struct morse_twt_agreement_data *twt_data, u8 *agreement)

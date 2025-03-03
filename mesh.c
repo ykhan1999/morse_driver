@@ -1,19 +1,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <linux/timer.h>
 #include <linux/bitfield.h>
@@ -317,7 +305,8 @@ int morse_mac_tx_mesh_probe_req(struct morse_vif *mors_vif, const u8 *dest_addr)
 
 int morse_mac_process_rx_mesh_probe_req(struct morse_vif *mors_vif,
 					struct dot11ah_ies_mask *ies_mask,
-					struct ieee80211_rx_status *rx_status, const u8 *src_addr)
+					const struct ieee80211_rx_status *rx_status,
+					const u8 *src_addr)
 {
 	struct ieee80211_vif *vif;
 	struct ie_element *mesh_id_ie = &ies_mask->ies[WLAN_EID_MESH_ID];
@@ -421,7 +410,7 @@ int morse_mac_process_mesh_tx_mgmt(struct morse_vif *mors_vif,
 			memcpy(mgt_probe_resp->bssid, mgt_probe_resp->da, ETH_ALEN);
 			memcpy(mgt_probe_resp->da, vif->addr, ETH_ALEN);
 
-			if (skb_probe_resp->len > 0) {
+			if (skb_probe_resp->len > 0 && rx_status->band == NL80211_BAND_5GHZ) {
 				MORSE_MESH_DBG(mors, "%s: Indicating SKB for probe resp\n",
 					       __func__);
 				ieee80211_rx_irqsafe(mors->hw, skb_probe_resp);
@@ -572,7 +561,7 @@ static bool morse_dynamic_peering_is_frame_allowed(struct morse_mesh *mesh,
 
 int morse_mac_process_mesh_rx_mgmt(struct morse_vif *mors_vif, struct sk_buff *skb,
 				   struct dot11ah_ies_mask *ies_mask,
-				   struct ieee80211_rx_status *rx_status)
+				   const struct ieee80211_rx_status *rx_status)
 {
 	struct ieee80211_vif *vif = morse_vif_to_ieee80211_vif(mors_vif);
 	struct morse_mesh *mesh = mors_vif->mesh;

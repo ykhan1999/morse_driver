@@ -1,19 +1,7 @@
 /*
  * Copyright 2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -23,6 +11,7 @@
 #include <linux/types.h>
 #include <net/mac80211.h>
 #include <linux/ieee80211.h>
+#include "dot11ah/dot11ah.h"
 
 #define DOT11_PV1_PROTOCOL_VERSION	0x0001
 
@@ -50,8 +39,6 @@
 #define DOT11_MAC_PV1_MGMT_SUB_TYPE_PROBE_RESP       0x0040
 #define DOT11_MAC_PV1_MGMT_SUB_TYPE_RA               0x0060
 
-#define WLAN_CATEGORY_S1G_PROTECTED    (23)
-
 #define DOT11_MAC_PV1_STYPE_OFFSET     (5)
 #if KERNEL_VERSION(5, 7, 19) > MAC80211_VERSION_CODE
 /* PV1 Layout 11ah 9.8.3.1 */
@@ -66,10 +53,6 @@
 #define IEEE80211_PV1_FCTL_RELAYED	0x4000
 #define IEEE80211_PV1_FCTL_ACK_POLICY	0x8000
 #endif
-
-enum ieee80211_s1g_prot_actioncode {
-	WLAN_S1G_HEADER_COMPRESSION = 3,
-};
 
 /*
  * PV1 Header Compression Control Subfields
@@ -342,9 +325,10 @@ int morse_mac_convert_pv0_to_pv1(struct morse *mors, struct morse_vif *mors_vif,
  *
  * @return     0 on success, error on failure
  */
-int morse_mac_convert_pv1_to_pv0(struct morse *mors, struct morse_vif *mors_vif,
-				struct sk_buff *skb, struct morse_skb_rx_status *hdr_rx_status,
-				struct dot11ah_mac_pv1_hdr *pv1_hdr);
+int morse_mac_convert_pv1_to_pv0(struct morse *mors,
+				 struct morse_vif *mors_vif, struct sk_buff *skb,
+				 const struct morse_skb_rx_status *hdr_rx_status,
+				 struct dot11ah_mac_pv1_hdr *pv1_hdr);
 
 /**
  * morse_pv1_find_sta    Get peer STA that has PV1 context based on PV1 header of RX frame
@@ -353,6 +337,9 @@ int morse_mac_convert_pv1_to_pv0(struct morse *mors, struct morse_vif *mors_vif,
  * @hdr:     PV1 header
  *
  * @return:  Pointer to STA context
+ *
+ * @note:	The RCU lock must be held when calling this function and while using the returned
+ *		pointer.
  */
 struct ieee80211_sta *morse_pv1_find_sta(struct ieee80211_vif *vif,
 				struct dot11ah_mac_pv1_hdr *hdr);

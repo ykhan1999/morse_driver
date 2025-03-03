@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -34,6 +22,7 @@ static const u8 morse_oui[] = { 0x0C, 0xBF, 0x74 };
 /** Operational bits in MM vendor IE */
 #define MORSE_VENDOR_IE_OPS0_DTIM_CTS_TO_SELF   BIT(0)
 #define MORSE_VENDOR_IE_OPS0_LEGACY_AMSDU       BIT(1)
+#define MORSE_VENDOR_IE_OPS0_RATE_CONTROL       GENMASK(3, 2)
 
 /** Capability bits in MM vendor IE */
 #define MORSE_VENDOR_IE_CAP0_MMSS_OFFSET        GENMASK(1, 0)
@@ -138,8 +127,8 @@ void morse_vendor_reset_sta_transient_info(struct ieee80211_vif *vif, struct mor
  * @vie Vendor IE which was found
  * @return int 0 on success else error code
  */
-int morse_vendor_send_mgmt_vendor_ie_found_event(struct ieee80211_vif *vif,
-						 u16 frame_type, struct ieee80211_vendor_ie *vie);
+int morse_vendor_send_mgmt_vendor_ie_found_event(struct ieee80211_vif *vif, u16 frame_type,
+						 const struct ieee80211_vendor_ie *vie);
 
 /**
  * Send an Off Channel Scan (OCS) netlink event

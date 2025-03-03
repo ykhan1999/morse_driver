@@ -1,19 +1,7 @@
 /*
  * Copyright 2022-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #ifndef _MORSE_UTILS_H_
@@ -41,21 +29,9 @@
 #define NSS_TO_NSS_IDX(x) ((x) - 1)
 
 /**
- * @brief Is ptr aligned to alignment byte boundary
- * @warning this function is undefined for non power-of-2 values of alignment
- *
- * @param ptr pointer to test if aligned
- * @param alignment power of 2 alignment value
- * @return true if aligned, else false
- */
-static inline bool is_aligned(void *ptr, u8 alignment)
-{
-	return ((uintptr_t)ptr & (alignment - 1)) == 0;
-}
-
-/**
  * @brief Align ptr to alignment downwards (ie. to a lower value)
  * eg. Aligning to 4 - 0x80000003 -> 0x80000000
+ * The kernel provides a macro for this after v5.10
  *
  * @param ptr Pointer to align
  * @param alignment byte boundary to align to
@@ -63,7 +39,7 @@ static inline bool is_aligned(void *ptr, u8 alignment)
  */
 static inline void *align_down(void *ptr, uint alignment)
 {
-	return (void *)((uintptr_t)ptr & (uintptr_t)(-alignment));
+	return (void *)((uintptr_t)ptr & -(uintptr_t)(alignment));
 }
 
 /**

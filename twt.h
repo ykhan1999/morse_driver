@@ -1,19 +1,7 @@
 /*
  * Copyright 2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -38,6 +26,7 @@
 #define TWT_AGREEMENT_TARGET_WAKE_TIME_OFFSET		(3)
 #define TWT_AGREEMENT_WAKE_DURATION_OFFSET		(11)
 #define TWT_AGREEMENT_WAKE_INTERVAL_MANTISSA_OFFSET	(12)
+#define TWT_TEARDOWN_FLOW_ID_MASK GENMASK(2, 0)
 
 enum morse_twt_state {
 	MORSE_TWT_STATE_NO_AGREEMENT,
@@ -91,10 +80,37 @@ struct morse_twt_event {
 	};
 };
 
+/*
+ * S1G action frame TWT action Category
+ */
+struct morse_dot11ah_s1g_twt_action {
+	__le16 frame_control;
+	__le16 duration;
+	u8 da[ETH_ALEN];
+	u8 sa[ETH_ALEN];
+	u8 bssid[ETH_ALEN];
+	__le16 seq_ctrl;
+	u8 category;
+	union {
+		struct {
+			u8 action_code;
+			u8 dialog_token;
+			u8 variable[];
+		} __packed twt_action_setup;
+		struct {
+			u8 action_code;
+			u8 flow;
+		} __packed twt_action_teardown;
+	} u;
+} __packed;
+
 struct morse_twt_sta {
 	struct list_head list;
 	u8 addr[ETH_ALEN];
-
+	/* dialog token of pending action frame */
+	u8 dialog_token;
+	/* flag to notify pending action frame */
+	bool action_is_pending;
 	struct morse_twt_agreement agreements[MORSE_TWT_AGREEMENTS_MAX_PER_STA];
 };
 
@@ -111,17 +127,17 @@ static inline struct morse_vif *morse_twt_to_morse_vif(struct morse_twt *twt)
 /**
  * @morse_twt_event_queue_purge() - Remove all events for a STA addr from the event queue
  *
- * @mors	The morse chip struct
- * @mors_vif	The morse VIF struct
- * @addr	Address of the STA to remove events for
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
+ * @addr       Address of the STA to remove events for
  */
 void morse_twt_event_queue_purge(struct morse *mors, struct morse_vif *mors_vif, u8 *addr);
 
 /**
  * morse_twt_sta_remove_addr() - Remove a station's TWT agreement.
  *
- * @mors	The morse chip struct
- * @mors_vif	The morse VIF struct
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
  * @skb		The sk_buff which should contain a (re)assoc frame
  *
  * Return:	0 on success or relevant error.
@@ -131,7 +147,7 @@ int morse_twt_sta_remove_addr(struct morse *mors, struct morse_vif *mors_vif, u8
 /**
  * morse_twt_insert_ie() - Insert a TWT IE into an sk_buff
  *
- * @mors	The morse chip struct
+ * @mors	Morse device
  * @tx		The TWT data to send
  * @ies_mask	Array of information elements.
  * @size	Size of the TWT IE (can be found using morse_twt_get_ie_size())
@@ -144,7 +160,7 @@ void morse_twt_insert_ie(struct morse *mors,
  *				freeing the associated memory.
  *
  *
- * @mors	The morse chip struct
+ * @mors	Morse device
  * @event	The event or TX data to get the TWT IE size of
  * @tx		The transmitted event to remove from the queue.
  *
@@ -156,7 +172,7 @@ int morse_twt_dequeue_tx(struct morse *mors, struct morse_vif *mors_vif,
 /**
  * morse_twt_get_ie_size() - Gets the size of a TWT IE for an event or TX data
  *
- * @mors	The morse chip struct
+ * @mors	Morse device
  * @event	The event or TX data to get the TWT IE size of
  *
  * Return:	Positive size of the TWT IE on success or negative error code
@@ -166,8 +182,8 @@ int morse_twt_get_ie_size(struct morse *mors, struct morse_twt_event *event);
 /**
  * morse_twt_peek_tx() - Get TWT TX data from the queue without removing it
  *
- * @mors	The morse chip struct
- * @mors_vif	The morse VIF struct
+ * @mors	   Morse device
+ * @mors_vif   Morse virtual interface
  * @addr	Destination address to get TX data for
  * @flow_id	Flow id to match if not NULL
  *
@@ -180,12 +196,12 @@ struct morse_twt_event *morse_twt_peek_tx(struct morse *mors,
 /**
  * morse_twt_parse_ie() - Parse a TWT IE and fills out an event
  *
- * @mors_vif	The virtual interface.
- * @ie		The TWT IE to parse.
- * @event	The event to fill.
- * @src_addr	Address of the device sending the IE.
+ * @mors_vif   Morse virtual interface
+ * @ie         The TWT IE to parse.
+ * @event      The event to fill.
+ * @src_addr   Address of the device sending the IE.
  *
- * Return:	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 		       struct morse_twt_event *event, const u8 *src_addr);
@@ -193,7 +209,7 @@ int morse_twt_parse_ie(struct morse_vif *mors_vif, struct ie_element *ie,
 /**
  * morse_twt_dump_element() - Prints out the information for an event
  *
- * @mors	The morse chip struct
+ * @mors	Morse device
  * @event	The twt event to dump
  */
 void morse_twt_dump_event(struct morse *mors, struct morse_twt_event *event);
@@ -201,33 +217,33 @@ void morse_twt_dump_event(struct morse *mors, struct morse_twt_event *event);
 /**
  * morse_twt_dump_wake_interval_tree() - Print the tree of wake intervals/agreements to debugfs
  *
- * @file	Seq file to print debug to.
- * @mors_vif	The morse VIF struct.
+ * @file       Seq file to print debug to
+ * @mors_vif   Morse virtual interface
  */
 void morse_twt_dump_wake_interval_tree(struct seq_file *file, struct morse_vif *mors_vif);
 
 /**
  * morse_twt_dump_sta_agreements() - Print the tree of stations/agreements to debugfs
  *
- * @file	Seq file to print debug to.
- * @mors_vif	The morse VIF struct.
+ * @file	    Seq file to print debug to
+ * @mors_vif    Morse virtual interface
  */
 void morse_twt_dump_sta_agreements(struct seq_file *file, struct morse_vif *mors_vif);
 
 /**
- * morse_twt_install_pending_agreements() - Installs pending agreements to the firmware
+ * morse_twt_process_pending_cmds() - Installs/Uninstalls pending agreements to the firmware
  *
- * @mors	The morse chip struct
- * @mors_vif	The morse VIF struct
+ * @mors	    Morse device
+ * @mors_vif	Morse virtual interface
  */
-void morse_twt_install_pending_agreements(struct morse *mors, struct morse_vif *mors_vif);
+void morse_twt_process_pending_cmds(struct morse *mors, struct morse_vif *mors_vif);
 
 /**
  * @morse_twt_queue_event() - Adds a TWT event to the queue
  *
- * @mors	The morse chip struct
- * @mors_vif	The morse VIF struct
- * @event	The event to queue
+ * @mors        Morse device
+ * @mors_vif    Morse virtual interface
+ * @event       The event to queue
  */
 void morse_twt_queue_event(struct morse *mors,
 			   struct morse_vif *mors_vif, struct morse_twt_event *event);
@@ -235,8 +251,8 @@ void morse_twt_queue_event(struct morse *mors,
 /**
  * morse_twt_handle_event() - Process a TWT event
  *
- * @mors_vif	The morse VIF struct
- * @addr	Address to filter on, if NULL proccess all events
+ * @mors_vif    Morse virtual interface
+ * @addr        Address to filter on, if NULL proccess all events
  */
 void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr);
 
@@ -248,40 +264,63 @@ void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr);
 void morse_twt_handle_event_work(struct work_struct *work);
 
 /**
+ * @morse_mac_process_rx_twt_mgmt() - Process TWT IEs in management frames
+ *
+ * @mors      Morse device
+ * @vif       VIF struct
+ * @skb       Rx management SKB
+ * @ies_mask  IEs Mask
+ *
+ * Return: -EACCESS to avoid forwarding, 0 to forward to mac80211,  or an error code.
+ */
+int morse_mac_process_rx_twt_mgmt(struct morse *mors, struct ieee80211_vif *vif,
+			const struct sk_buff *skb, struct dot11ah_ies_mask *ies_mask);
+
+/**
+ * @morse_mac_process_twt_action_tx_finish() - Process Tx completion of TWT action frames
+ *
+ * @mors      Morse device
+ * @vif       VIF struct
+ * @skb       Tx TWT action SKB
+ */
+void morse_mac_process_twt_action_tx_finish(struct morse *mors, struct ieee80211_vif *vif,
+			const struct sk_buff *skb);
+
+/**
  * morse_twt_init() - Initialise TWT
  *
- * @mors	The morse chip struct
+ * @mors    Morse device
  *
- * Return:	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_twt_init(struct morse *mors);
 
 /**
  * morse_twt_init_vif() - Initialise TWT for a VIF, this should be done after morse_twt_init()
  *
- * @mors	The morse chip struct
- * @mors_vif	The virtual interface
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
  *
- * Return:	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_twt_init_vif(struct morse *mors, struct morse_vif *mors_vif);
 
 /**
  * morse_twt_finish_vif() - Initialise TWT for a VIF, this should be done before morse_twt_finish()
  *
- * @mors	The morse chip struct
- * @mors_vif	The virtual interface
+ * @mors       Morse device
+ * @mors_vif   Morse virtual interface
  *
- * Return:	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_twt_finish_vif(struct morse *mors, struct morse_vif *mors_vif);
 
 /**
  * morse_twt_finish() - Finish TWT
  *
- * @mors	The morse chip struct
+ * @mors	Morse device
  *
- * Return:	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_twt_finish(struct morse *mors);
 
@@ -300,12 +339,66 @@ int morse_twt_initialise_agreement(struct morse_twt_agreement_data *twt_data, u8
 /**
  * morse_process_twt_cmd() - Process TWT message triggered by morsectrl
  *
- * @mors	The morse chip struct
- * @morse_vif	The morse VIF struct
- * @cmd		Incoming twt conf command parameters
+ * @mors        Morse device
+ * @morse_vif   Morse virtual interface
+ * @cmd         Incoming twt conf command parameters
  *
- * Return	0 on success or relevant error
+ * @return 0 on success, else error code
  */
 int morse_process_twt_cmd(struct morse *mors, struct morse_vif *mors_vif, struct morse_cmd *cmd);
+
+ /**
+  * morse_dot11_is_twt_setup_action_frame() - Checks if TWT setup action frame
+  *
+  * @twt_action	pointer to mgmt frame
+  *
+  * @return true, if TWT setup action frame, else false
+  */
+static inline bool morse_dot11_is_twt_setup_action_frame
+		(struct morse_dot11ah_s1g_twt_action *twt_action)
+{
+	u8 action_code = twt_action->u.twt_action_setup.action_code;
+
+	/*
+	 * Check for TWT Setup frame
+	 */
+	return ((twt_action->category == WLAN_CATEGORY_S1G_PROTECTED &&
+			(action_code == WLAN_S1G_PROTECTED_TWT_SETUP)) ||
+			(twt_action->category == WLAN_CATEGORY_S1G_UNPROTECTED &&
+			(action_code == WLAN_S1G_TWT_SETUP)));
+}
+
+ /**
+  * morse_dot11_is_twt_teardown_action_frame() - Checks if TWT teardown action frame
+  *
+  * @twt_action	pointer to mgmt frame
+  *
+  * @return true, if TWT teardown action frame, else false
+  */
+static inline bool morse_dot11_is_twt_teardown_action_frame
+		(struct morse_dot11ah_s1g_twt_action *twt_action)
+{
+	u8 action_code = twt_action->u.twt_action_setup.action_code;
+
+	/*
+	 * Check for TWT teardown frame only as TWT Teardown will not have IEs
+	 */
+	return ((twt_action->category == WLAN_CATEGORY_S1G_PROTECTED &&
+			(action_code == WLAN_S1G_PROTECTED_TWT_TEARDOWN)) ||
+			(twt_action->category == WLAN_CATEGORY_S1G_UNPROTECTED &&
+			(action_code == WLAN_S1G_TWT_TEARDOWN)));
+}
+
+/**
+ * morse_dot11_twt_action_ie_pos() - Get the position of the IE in TWT setup action frame
+ *
+ * @twt_action	pointer to mgmt frame
+ *
+ * @return position of IE in TWT setup action frame
+ */
+static inline u8 *morse_dot11_twt_action_ie_pos(struct morse_dot11ah_s1g_twt_action *twt_action)
+{
+	return twt_action->u.twt_action_setup.variable;
+}
 
 #endif

@@ -1,19 +1,7 @@
 /*
  * Copyright 2017-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -129,13 +117,14 @@ int __morse_ps_evaluate(struct morse_ps *mps)
 	struct morse *mors = container_of(mps, struct morse, ps);
 	bool needs_wake = false;
 	bool eval_later = false;
-	bool event_flags = (mors->chip_if->event_flags & ~(MORSE_DATA_TRAFFIC_PAUSE_PEND));
+	unsigned long flags_on_entry =
+		(mors->chip_if->event_flags & ~BIT(MORSE_DATA_TRAFFIC_PAUSE_PEND));
 
 	if (!mps->enable)
 		return 0;
 
 	needs_wake = (mps->wakers > 0);
-	needs_wake |= (event_flags > 0);
+	needs_wake |= (flags_on_entry > 0);
 	needs_wake |= (mors->cfg->ops->skbq_get_tx_buffered_count(mors) > 0);
 
 	if (!needs_wake &&

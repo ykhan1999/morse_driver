@@ -1,19 +1,7 @@
 /*
  * Copyright 2024 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #pragma once
 
@@ -53,6 +41,8 @@ enum morse_coredump_reason {
 	MORSE_COREDUMP_REASON_HEALTH_CHECK_FAILED = 1,
 	/* user requested a coredump (vendor command) */
 	MORSE_COREDUMP_REASON_USER_REQUEST = 2,
+	/* chip has notified host of stop */
+	MORSE_COREDUMP_REASON_CHIP_INDICATED_STOP = 3,
 };
 
 /* Describe note types when parsing notes in a morse coredump file
@@ -168,6 +158,8 @@ static inline const char *morse_coredump_reason_to_str(enum morse_coredump_reaso
 		return "health check failure";
 	case MORSE_COREDUMP_REASON_USER_REQUEST:
 		return "user request";
+	case MORSE_COREDUMP_REASON_CHIP_INDICATED_STOP:
+		return "chip indicated stop";
 	default:
 		return "unknown";
 	}

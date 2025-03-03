@@ -4,19 +4,7 @@
 /*
  * Copyright 2017-2022 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 #include <linux/skbuff.h>
@@ -38,13 +26,13 @@ extern struct ieee80211_supported_band mors_band_5ghz;
 void morse_mac_send_buffered_bc(struct ieee80211_vif *vif);
 struct morse *morse_mac_create(size_t priv_size, struct device *dev);
 void morse_mac_destroy(struct morse *mors);
-int morse_mac_skb_recv(struct morse *mors, struct sk_buff *skb,
+void morse_mac_skb_recv(struct morse *mors, struct sk_buff *skb,
 		       struct morse_skb_rx_status *hdr_rx_status);
 int morse_mac_event_recv(struct morse *mors, struct sk_buff *skb);
 int morse_mac_register(struct morse *mors);
 void morse_mac_unregister(struct morse *mors);
 void morse_mac_rx_status(struct morse *mors,
-			 struct morse_skb_rx_status *hdr_rx_status,
+			 const struct morse_skb_rx_status *hdr_rx_status,
 			 struct ieee80211_rx_status *rx_status, struct sk_buff *skb);
 void morse_mac_skb_free(struct morse *mors, struct sk_buff *skb);
 
@@ -62,6 +50,7 @@ void morse_mac_fill_tx_info(struct morse *mors, struct morse_skb_tx_info *tx_inf
 
 bool is_thin_lmac_mode(void);
 bool is_virtual_sta_test_mode(void);
+bool is_sw_crypto_mode(void);
 
 /* Return a pointer to vif from vif id of tx status */
 struct ieee80211_vif *morse_get_vif_from_tx_status(struct morse *mors,
@@ -80,7 +69,7 @@ struct ieee80211_vif *morse_get_vif(struct morse *mors);
 
 /* Return a pointer to vif from vif id of rx status */
 struct ieee80211_vif *morse_get_vif_from_rx_status(struct morse *mors,
-						   struct morse_skb_rx_status *hdr_rx_status);
+						const struct morse_skb_rx_status *hdr_rx_status);
 
 /* Return a pointer to the AP vif if present otherwise NULL */
 struct ieee80211_vif *morse_get_ap_vif(struct morse *mors);
@@ -318,9 +307,6 @@ void morse_fill_tx_info(struct morse *mors,
 /* Process ECSA IE and store the channel info. Also starts chan switch timer in sta mode */
 void morse_mac_process_ecsa_ie(struct morse *mors, struct ieee80211_vif *vif, struct sk_buff *skb);
 
-/* Process tx completion of skb used mainly for beacon change sequence */
-void morse_mac_process_bcn_change_seq_tx_finish(struct morse *mors, struct sk_buff *skb);
-
 /**
  * morse_mac_ecsa_beacon_tx_done - Process tx status completion of beacon to trigger the
  * channel switch.
@@ -355,6 +341,14 @@ u8 *morse_mac_get_ie_pos(struct sk_buff *skb, int *ies_len, int *header_length, 
  * Return: 0 on success, else relevant error
  */
 int morse_mac_tx_mgmt_frame(struct ieee80211_vif *vif, struct sk_buff *skb);
+
+/**
+ * morse_mac_process_tx_finish - Process Tx completion of frames
+ *
+ * @mors: pointer to morse struct
+ * @skb:  pointer to the management packet buffer
+ */
+void morse_mac_process_tx_finish(struct morse *mors, struct sk_buff *skb);
 
 u64 morse_mac_generate_timestamp_for_frame(struct morse_vif *mors_vif);
 

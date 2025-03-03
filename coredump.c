@@ -1,19 +1,7 @@
 /*
  * Copyright 2024 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  */
 #include <linux/types.h>
 #include <linux/atomic.h>
@@ -77,10 +65,17 @@ static int read_memory_region(struct morse *mors,
 						void *copy_to)
 {
 	int ret;
-	void *buffer = kzalloc(ROUND_BYTES_TO_WORD(region->len), GFP_KERNEL);
+	void *buffer;
 
+	if (WARN_ON(ROUND_BYTES_TO_WORD(region->len) > INT_MAX)) {
+		MORSE_COREDUMP_ERR(mors, "%s: invalid length for region 0x%08x:%u",
+				   __func__, region->start, region->len);
+		return -EINVAL;
+	}
+
+	buffer = kzalloc(ROUND_BYTES_TO_WORD(region->len), GFP_KERNEL);
 	if (!buffer) {
-		MORSE_COREDUMP_ERR(mors, "%s: failed to alloc buffer for 0x%08x:%d",
+		MORSE_COREDUMP_ERR(mors, "%s: failed to alloc buffer for 0x%08x:%u",
 						   __func__,
 						   region->start,
 						   region->len);
@@ -93,12 +88,13 @@ static int read_memory_region(struct morse *mors,
 	if (region->len == sizeof(u32))
 		ret = morse_reg32_read(mors, region->start, buffer);
 	else
-		ret = morse_dm_read(mors, region->start, buffer, ROUND_BYTES_TO_WORD(region->len));
+		ret = morse_dm_read(mors, region->start, buffer,
+				    (int)ROUND_BYTES_TO_WORD(region->len));
 
 	if (!ret)
 		memcpy(copy_to, buffer, region->len);
 	else
-		MORSE_COREDUMP_ERR(mors, "%s: failed to read memory 0x%08x:%d",
+		MORSE_COREDUMP_ERR(mors, "%s: failed to read memory 0x%08x:%u",
 						   __func__,
 						   region->start,
 						   region->len);

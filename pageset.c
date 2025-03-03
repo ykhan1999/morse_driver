@@ -1,19 +1,7 @@
 /*
  * Copyright 2021-2023 Morse Micro
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, see
- * <https://www.gnu.org/licenses/>.
+ * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
 
@@ -851,9 +839,15 @@ void morse_pagesets_work(struct work_struct *work)
 	struct morse *mors = container_of(work,
 					  struct morse, chip_if_work);
 	int ps_bus_timeout_ms = 0;
+	unsigned long flags_on_entry = mors->chip_if->event_flags;
 	unsigned long *flags = &mors->chip_if->event_flags;
+	int rx_buffered_on_entry = morse_pageset_get_rx_buffered_count(mors);
 
-	if (!(mors->chip_if->event_flags))
+	if (!flags_on_entry)
+		return;
+
+	/* Don't attempt to interact with device once it becomes unresponsive */
+	if (test_bit(MORSE_STATE_FLAG_CHIP_UNRESPONSIVE, &mors->state_flags))
 		return;
 
 	/* Disable power save in case it is running */
@@ -873,13 +867,8 @@ void morse_pagesets_work(struct work_struct *work)
 	 * Check if all pages were removed, set event flags if not.
 	 */
 	if (test_and_clear_bit(MORSE_RX_PEND, flags)) {
-		int buffered = morse_pageset_get_rx_buffered_count(mors);
-
 		if (morse_pageset_rx_handler(mors->chip_if->from_chip_pageset))
 			set_bit(MORSE_RX_PEND, flags);
-
-		if (morse_pageset_get_rx_buffered_count(mors) > buffered)
-			ps_bus_timeout_ms = max(ps_bus_timeout_ms, morse_network_bus_timeout(mors));
 	}
 
 	/* Handle any free TX pages being returned so caches are refilled */
@@ -905,7 +894,6 @@ void morse_pagesets_work(struct work_struct *work)
 
 	/* TX mgmt before considering data */
 	if (test_and_clear_bit(MORSE_TX_MGMT_PEND, flags)) {
-		ps_bus_timeout_ms = max(ps_bus_timeout_ms, morse_network_bus_timeout(mors));
 		if (morse_pageset_tx_mgmt_handler(mors->chip_if->to_chip_pageset))
 			set_bit(MORSE_TX_MGMT_PEND, flags);
 	}
@@ -915,8 +903,8 @@ void morse_pagesets_work(struct work_struct *work)
 		if (test_and_clear_bit(MORSE_DATA_TRAFFIC_RESUME_PEND, flags))
 			MORSE_ERR_RATELIMITED(mors,
 					      "Latency to handle traffic pause is too great\n");
-
-		morse_skbq_data_traffic_pause(mors);
+		else
+			morse_skbq_data_traffic_pause(mors);
 	}
 
 	/* Resume TX data Qs  */
@@ -930,10 +918,18 @@ void morse_pagesets_work(struct work_struct *work)
 
 	/* Finally TX any data */
 	if (test_and_clear_bit(MORSE_TX_DATA_PEND, flags)) {
-		ps_bus_timeout_ms = max(ps_bus_timeout_ms, morse_network_bus_timeout(mors));
 		if (morse_pageset_tx_data_handler(mors->chip_if->to_chip_pageset))
 			set_bit(MORSE_TX_DATA_PEND, flags);
 	}
+
+	/* Calculate timeout to disable the shared bus with the chip. For any TX that was
+	 * pushed down, or non-CMD RX that came up from the chip - increase the timeout as
+	 * 'network activity' was seen.
+	 */
+	if (test_bit(MORSE_TX_DATA_PEND, &flags_on_entry) ||
+	    test_bit(MORSE_TX_MGMT_PEND, &flags_on_entry) ||
+	    morse_pageset_get_rx_buffered_count(mors) > rx_buffered_on_entry)
+		ps_bus_timeout_ms = max(ps_bus_timeout_ms, morse_network_bus_timeout(mors));
 
 	if (ps_bus_timeout_ms)
 		morse_ps_bus_activity(mors, ps_bus_timeout_ms);
