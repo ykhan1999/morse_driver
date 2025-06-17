@@ -216,9 +216,9 @@ static void elf_copy_notes(struct morse *mors,
 		(*phdr)->p_memsz = (*phdr)->p_filesz;
 
 		/* init note header */
-		enote->n_type = cpu_to_le32(note->type);
-		enote->n_namesz = cpu_to_le32(note->namesz);
-		enote->n_descsz = cpu_to_le32(note->datasz);
+		enote->n_type = (__force u32)cpu_to_le32(note->type);
+		enote->n_namesz = (__force u32)cpu_to_le32(note->namesz);
+		enote->n_descsz = (__force u32)cpu_to_le32(note->datasz);
 
 		/* copy in note name + data */
 		insert_at += sizeof(*enote);
@@ -285,7 +285,7 @@ static void elf_init_header(struct morse *mors, struct elf32_hdr *ehdr, size_t p
 static void add_coredump_meta(const struct morse *mors, struct list_head *notes)
 {
 	const struct morse_coredump_data *crash = &mors->coredump.crash;
-	u32 cd_file_version = cpu_to_le32(MORSE_COREDUMP_FILE_VERSION);
+	u32 cd_file_version = (__force u32)cpu_to_le32(MORSE_COREDUMP_FILE_VERSION);
 	u32 rel_major = mors->sw_ver.major;
 	u32 rel_minor = mors->sw_ver.minor;
 	u32 rel_patch = mors->sw_ver.patch;
@@ -350,10 +350,15 @@ static int coredump_build(struct morse *mors, void **cd, size_t *cd_size)
 	phdr = (struct elf32_phdr *)((u8 *)ehdr + ehdr->e_phoff);
 	offset = sizeof(*ehdr) + (sizeof(*phdr) * ehdr->e_phnum);
 
-	/* insert memory regions */
+	/* Claim/release bus for the entire bus access operation */
+	morse_claim_bus(mors);
+
+	/* Insert memory regions */
 	elf_copy_memory_regions(mors, ehdr, &phdr, &offset);
 
-	/* insert notes */
+	morse_release_bus(mors);
+
+	/* Insert notes */
 	elf_copy_notes(mors, &notes, ehdr, &phdr, &offset);
 
 	MORSE_COREDUMP_DBG(mors, "%s: elf size: %zu, n program headers: %zu",
@@ -448,14 +453,14 @@ int morse_coredump(struct morse *mors)
 	if (use_userspace)
 		method = COREDUMP_METHOD_USERSPACE_SCRIPT;
 
-	morse_claim_bus(mors);
-
 	/* Trigger a crash on-chip to force it to stop and save state. Will have
 	 * no affect if chip has already crashed
 	 */
 	if (mors->firmware_flags & MORSE_FW_FLAGS_SUPPORT_CHIP_HALT_IRQ) {
+		morse_claim_bus(mors);
 		ret = morse_reg32_write(mors, MORSE_CHIP_HALT_TRGR_SET(mors),
 								MORSE_CHIP_HALT_IRQ_BIT);
+		morse_release_bus(mors);
 
 		if (ret) {
 			MORSE_COREDUMP_WARN(mors,
@@ -493,7 +498,6 @@ exit:
 	if (ret)
 		MORSE_COREDUMP_ERR(mors, "%s: failed to coredump: %d\n", __func__, ret);
 
-	morse_release_bus(mors);
 	return ret;
 }
 
@@ -502,6 +506,9 @@ int morse_coredump_new(struct morse *mors, enum morse_coredump_reason reason)
 	struct morse_coredump_data *data = &mors->coredump.crash;
 
 	if (!enable_coredump)
+		return -ENOTSUPP;
+
+	if (mors->bus_type == MORSE_HOST_BUS_TYPE_USB)
 		return -ENOTSUPP;
 
 	lockdep_assert_held(&mors->lock);

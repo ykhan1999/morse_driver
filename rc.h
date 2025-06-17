@@ -44,6 +44,12 @@ bool _morse_rc_set_fixed_rate(struct morse *mors,
 			      struct ieee80211_sta *sta,
 			      int mcs, int bw, int ss, int guard, const char *caller);
 
+bool morse_rc_get_enable_fixed_rate(void);
+int morse_rc_get_fixed_bandwidth(void);
+int morse_rc_get_fixed_mcs(void);
+int morse_rc_get_fixed_ss(void);
+int morse_rc_get_fixed_guard(void);
+
 void morse_rc_sta_remove(struct morse *mors, struct ieee80211_sta *sta);
 
 void morse_rc_sta_fill_tx_rates(struct morse *mors,

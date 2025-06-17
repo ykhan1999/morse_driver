@@ -299,7 +299,7 @@ static int morse_pager_sw_notify_pager(const struct morse_pager *pager)
 static int morse_pager_sw_pop(struct morse_pager *pager, struct morse_page *page)
 {
 	int ret = 0;
-	u32 page_addr = 0;
+	__le32 page_addr = 0;
 
 	if (kfifo_is_empty(&MORSE_AUX_DATA_CACHE(pager))) {
 		int i;
@@ -333,7 +333,7 @@ static int morse_pager_sw_pop(struct morse_pager *pager, struct morse_page *page
 		kfree(buffer);
 	}
 
-	ret = kfifo_get(&MORSE_AUX_DATA_CACHE(pager), &page_addr);
+	ret = kfifo_get(&MORSE_AUX_DATA_CACHE(pager), (__force u32 *)&page_addr);
 	WARN_ON(ret == 0);
 	ret = 0;
 
@@ -347,11 +347,11 @@ static int morse_pager_sw_pop(struct morse_pager *pager, struct morse_page *page
 static int morse_pager_sw_put(struct morse_pager *pager, struct morse_page *page)
 {
 	int ret = 0;
-	u32 page_addr = cpu_to_le32(page->addr);
+	__le32 page_addr = cpu_to_le32(page->addr);
 	struct morse_pager_sw_aux_data *aux_data =
 	    (struct morse_pager_sw_aux_data *)pager->aux_data;
 
-	ret = kfifo_put(&MORSE_AUX_DATA_CACHE(pager), page_addr);
+	ret = kfifo_put(&MORSE_AUX_DATA_CACHE(pager), (__force u32)page_addr);
 	WARN_ON(ret == 0);
 
 	aux_data->pages_need_put = true;
@@ -488,7 +488,7 @@ int morse_pager_sw_pagesets_init(struct morse *mors)
 		}
 
 		ret = morse_pager_sw_init(mors, pager, addr,
-					  __le32_to_cpu(pager_entry.size),
+					  __le16_to_cpu(pager_entry.size),
 					  __le32_to_cpu(pager_entry.base),
 					  __le32_to_cpu(pager_entry.head),
 					  __le32_to_cpu(pager_entry.tail));

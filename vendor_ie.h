@@ -119,6 +119,6 @@ void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, const struct sk_
  * @return 0 on success, else error code
  */
 int morse_vendor_ie_handle_config_cmd(struct morse_vif *mors_vif,
-				      struct morse_cmd_vendor_ie_config *cfg);
+				      struct morse_cmd_req_vendor_ie_config *cfg);
 
 #endif /* !_MORSE_VENDOR_IE_H_ */

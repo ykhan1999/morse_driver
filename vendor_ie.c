@@ -397,43 +397,45 @@ void morse_vendor_ie_process_rx_mgmt(struct ieee80211_vif *vif, const struct sk_
 }
 
 int morse_vendor_ie_handle_config_cmd(struct morse_vif *mors_vif,
-				      struct morse_cmd_vendor_ie_config *cfg)
+				      struct morse_cmd_req_vendor_ie_config *cfg)
 {
 	int ret = -EINVAL;
-	const u16 data_size = (cfg->hdr.len + sizeof(cfg->hdr)) - sizeof(*cfg);
+	const u16 data_size =
+		le16_to_cpu(cfg->hdr.len) - sizeof(cfg->opcode) - sizeof(cfg->mgmt_type_mask);
+	u16 mgmt_type_mask = le16_to_cpu(cfg->mgmt_type_mask);
 
-	if (!cfg->mgmt_type_mask ||
-	    (cfg->mgmt_type_mask &
-	     ~(MORSE_VENDOR_IE_TYPE_BEACON |
-	       MORSE_VENDOR_IE_TYPE_PROBE_REQ | MORSE_VENDOR_IE_TYPE_PROBE_RESP |
-	       MORSE_VENDOR_IE_TYPE_ASSOC_REQ | MORSE_VENDOR_IE_TYPE_ASSOC_RESP)))
+	if (!mgmt_type_mask ||
+	    (mgmt_type_mask &
+	     ~(MORSE_CMD_VENDOR_IE_TYPE_FLAG_BEACON |
+	       MORSE_CMD_VENDOR_IE_TYPE_FLAG_PROBE_REQ | MORSE_CMD_VENDOR_IE_TYPE_FLAG_PROBE_RESP |
+	       MORSE_CMD_VENDOR_IE_TYPE_FLAG_ASSOC_REQ | MORSE_CMD_VENDOR_IE_TYPE_FLAG_ASSOC_RESP)))
 		return -ENOTSUPP;
 
-	switch (cfg->opcode) {
-	case MORSE_VENDOR_IE_OP_ADD_ELEMENT:
+	switch (le16_to_cpu(cfg->opcode)) {
+	case MORSE_CMD_VENDOR_IE_OP_ADD_ELEMENT:
 		{
-			ret = morse_vendor_ie_add_to_ie_list(mors_vif, cfg->mgmt_type_mask,
+			ret = morse_vendor_ie_add_to_ie_list(mors_vif, mgmt_type_mask,
 							     cfg->data, data_size);
 			break;
 		}
-	case MORSE_VENDOR_IE_OP_CLEAR_ELEMENTS:
+	case MORSE_CMD_VENDOR_IE_OP_CLEAR_ELEMENTS:
 		{
-			ret = morse_vendor_ie_clear_ie_list(mors_vif, cfg->mgmt_type_mask);
+			ret = morse_vendor_ie_clear_ie_list(mors_vif, mgmt_type_mask);
 			break;
 		}
-	case MORSE_VENDOR_IE_OP_ADD_FILTER:
+	case MORSE_CMD_VENDOR_IE_OP_ADD_FILTER:
 		{
 			if (data_size != OUI_SIZE)
 				break;
 
-			ret = morse_vendor_ie_add_oui_to_filter(mors_vif, cfg->mgmt_type_mask,
+			ret = morse_vendor_ie_add_oui_to_filter(mors_vif, mgmt_type_mask,
 				      cfg->data, morse_vendor_send_mgmt_vendor_ie_found_event);
 
 			break;
 		}
-	case MORSE_VENDOR_IE_OP_CLEAR_FILTERS:
+	case MORSE_CMD_VENDOR_IE_OP_CLEAR_FILTERS:
 		{
-			ret = morse_vendor_ie_clear_oui_filter(mors_vif, cfg->mgmt_type_mask);
+			ret = morse_vendor_ie_clear_oui_filter(mors_vif, mgmt_type_mask);
 			break;
 		}
 	}

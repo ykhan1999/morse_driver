@@ -16,6 +16,32 @@
 /* The maximum number of frames to send after a DTIM to firmware */
 #define MORSE_MAX_MC_FRAMES_AFTER_DTIM (10)
 
+/* Re-Define the IGNORE channel flag, if not defined by the cfg80211 patch.
+ * The flag won't be used by MM81xx.
+ */
+#if defined(__x86_64__)
+#define IEEE80211_CHAN_IGNORE	IEEE80211_CHAN_DISABLED
+#endif
+
+/**
+ * struct morse_queue_params - QoS parameters
+ *
+ * @uapsd: access category status for UAPSD
+ * @aci: access category index
+ * @aifs: arbitration interframe space [0..255]
+ * @cw_min: minimum contention window
+ * @cw_max: maximum contention window
+ * @txop: maximum burst time in units of usecs, 0 meaning disabled
+ */
+struct morse_queue_params {
+	u8 uapsd;
+	u8 aci;
+	u8 aifs;
+	u16 cw_min;
+	u16 cw_max;
+	u32 txop;
+};
+
 /* Check if MAC80211_MESH is enabled in .config */
 #define MESH_CONFIG_ENABLED(value) \
 		(IS_ENABLED(CONFIG_##value) || IS_ENABLED(CPTCFG_##value) || \
@@ -39,7 +65,7 @@ void morse_mac_skb_free(struct morse *mors, struct sk_buff *skb);
 void morse_mac_update_custom_s1g_capab(struct morse_vif *mors_vif,
 				       struct dot11ah_ies_mask *ies_mask,
 				       enum nl80211_iftype vif_type);
-int morse_mac_pkt_to_s1g(struct morse *mors, struct morse_sta *mors_sta,
+int morse_mac_pkt_to_s1g(struct morse *mors, const struct ieee80211_sta *sta,
 			 struct sk_buff **skb, int *tx_bw_mhz);
 
 /**
@@ -49,6 +75,13 @@ int morse_mac_pkt_to_s1g(struct morse *mors, struct morse_sta *mors_sta,
  * Return: true if powersave can be enabled.
  */
 bool morse_mac_ps_enabled(struct morse *mors);
+
+/**
+ * Get slow clock mode
+ *
+ * Return: Slow clock mode. It will be a value from @ref enum morse_cmd_slow_clock_mode
+ */
+enum morse_cmd_slow_clock_mode morse_mac_slow_clock_mode(void);
 
 int morse_mac_watchdog_create(struct morse *mors);
 void morse_mac_mcs0_10_stats_dump(struct morse *mors, struct seq_file *file);
@@ -367,5 +400,9 @@ u64 morse_mac_generate_timestamp_for_frame(struct morse_vif *mors_vif);
  * Return: true if enabled
  */
 bool morse_mac_is_1mhz_probe_req_enabled(void);
+
+u8 morse_mac_get_mcs10_mode(void);
+u16 morse_mac_get_mcs_mask(void);
+bool morse_mac_is_rts_8mhz_enabled(void);
 
 #endif /* !_MORSE_MAC_H_ */

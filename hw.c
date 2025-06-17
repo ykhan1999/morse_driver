@@ -116,6 +116,26 @@ int morse_hw_irq_clear(struct morse *mors)
 	return 0;
 }
 
+int morse_hw_toggle_aon_latch(struct morse *mors)
+{
+	u32 address = MORSE_REG_AON_LATCH_ADDR(mors);
+	u32 mask = MORSE_REG_AON_LATCH_MASK(mors);
+	u32 latch;
+
+	if (address) {
+		/* invoke AON latch procedure */
+		morse_reg32_read(mors, address, &latch);
+		morse_reg32_write(mors, address, latch & ~(mask));
+		mdelay(5);
+		morse_reg32_write(mors, address, latch | mask);
+		mdelay(5);
+		morse_reg32_write(mors, address, latch & ~(mask));
+		mdelay(5);
+	}
+
+	return 0;
+}
+
 int morse_hw_reset(int reset_pin)
 {
 	int ret = gpio_request(reset_pin, "morse-reset-ctrl");

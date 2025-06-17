@@ -27,7 +27,7 @@
 
 struct morse;
 struct morse_vif;
-struct morse_cmd_raw_cfg;
+struct morse_cmd_req_config_raw;
 
 /**
  * enum ieee80211_s1g_rps_raw_type - types of RAW possible in the RPS IE
@@ -281,7 +281,7 @@ u8 *morse_raw_get_rps_ie(struct morse_vif *mors_vif);
  * @cmd:	Command from morsectrl
  * Return: 0 if command was processed successfully, otherwise error code
  */
-int morse_raw_process_cmd(struct morse_vif *mors_vif, struct morse_cmd_raw_cfg *cmd);
+int morse_raw_process_cmd(struct morse_vif *mors_vif, struct morse_cmd_req_config_raw *cmd);
 
 /**
  * morse_raw_create_or_find_by_id() - Create a RAW config with the specified ID if it does not

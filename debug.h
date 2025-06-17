@@ -1,10 +1,10 @@
+#ifndef _MORSE_DEBUG_H_
+#define _MORSE_DEBUG_H_
 /*
  * Copyright 2017-2023 Morse Micro
  *
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
-
-#pragma once
 
 #include "morse.h"
 #include "skb_header.h"
@@ -186,3 +186,5 @@ void morse_log_modparams(struct morse *mors);
 void mmrc_s1g_add_sta_debugfs(struct morse *mors);
 void mmrc_s1g_add_mesh_debugfs(struct morse *mors);
 #endif
+
+#endif	/* !_MORSE_DEBUG_H_ */

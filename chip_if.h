@@ -42,7 +42,6 @@ enum morse_chip_if_event_flags {
 	MORSE_TX_PACKET_FREED_UP_PEND,
 	MORSE_DATA_TRAFFIC_PAUSE_PEND,
 	MORSE_DATA_TRAFFIC_RESUME_PEND,
-	MORSE_YAPS_STATUS_REG_READ_PEND,
 };
 
 struct chip_if_ops {

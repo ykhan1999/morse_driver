@@ -8,7 +8,7 @@ else
 endif
 
 # Set 0 to a version number. This is done to match the Linux expectations
-override MORSE_VERSION = "0-rel_1_14_1_2024_Dec_05"
+override MORSE_VERSION = "0-rel_1_15_3_2025_Apr_16"
 
 USING_CLANG := $(shell $(CC) -v 2>&1 | grep -c "clang version")
 
@@ -33,6 +33,7 @@ ccflags-$(CONFIG_MORSE_IPMON) += "-DCONFIG_MORSE_IPMON"
 ccflags-$(CONFIG_MORSE_MONITOR) += "-DCONFIG_MORSE_MONITOR"
 ccflags-$(CONFIG_MORSE_PAGESET_TRACE) += "-DCONFIG_MORSE_PAGESET_TRACE"
 ccflags-$(CONFIG_MORSE_BUS_TRACE) += "-DCONFIG_MORSE_BUS_TRACE"
+ccflags-$(CONFIG_ANDROID) += "-DCONFIG_ANDROID"
 
 ifneq ($(CONFIG_BACKPORT_VERSION),)
 # Convert a version string from "vX.Y.Z-stuff" into an integer for comparison with KERNEL_VERSION
@@ -62,7 +63,11 @@ ccflags-y += "-DCONFIG_MORSE_SDIO_ALIGNMENT=$(CONFIG_MORSE_SDIO_ALIGNMENT)"
 
 ifneq ($(CONFIG_DISABLE_MORSE_RC),y)
 	ccflags-y += "-DCONFIG_MORSE_RC"
+ifeq ($(CONFIG_ANDROID),y)
+	ccflags-y += "-I$(srctree)/$(src)/mmrc"
+else
 	ccflags-y += "-I$(src)/mmrc"
+endif
 endif
 
 ifeq ($(CONFIG_MORSE_DHCP_OFFLOAD),y)
@@ -148,6 +153,7 @@ morse-y += pv1.o
 morse-y += hw_scan.o
 morse-y += coredump.o
 morse-y += peer.o
+morse-y += led.o
 morse-$(CONFIG_MORSE_MONITOR) += monitor.o
 morse-$(CONFIG_MORSE_SDIO) += sdio.o
 morse-$(CONFIG_MORSE_SPI) += spi.o

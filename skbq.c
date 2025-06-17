@@ -279,7 +279,7 @@ static void insert_pending_skb_to_skbq(struct morse_skbq *mq,
 	/* Check if it should just be inserted on to the end */
 	mhdr = (struct morse_buff_skb_header *)tail->data;
 	MORSE_WARN_ON(FEATURE_ID_SKB, insertion_id == mhdr->tx_info.pkt_id);
-	if (insertion_id >= mhdr->tx_info.pkt_id) {
+	if (le32_to_cpu(insertion_id) >= le32_to_cpu(mhdr->tx_info.pkt_id)) {
 		__morse_skbq_put(mq, &mq->skbq, skb, false, NULL);
 		return;
 	}
@@ -289,7 +289,7 @@ static void insert_pending_skb_to_skbq(struct morse_skbq *mq,
 		mhdr = (struct morse_buff_skb_header *)pfirst->data;
 
 		MORSE_WARN_ON(FEATURE_ID_SKB, insertion_id == mhdr->tx_info.pkt_id);
-		if (insertion_id <= mhdr->tx_info.pkt_id) {
+		if (le32_to_cpu(insertion_id) <= le32_to_cpu(mhdr->tx_info.pkt_id)) {
 			__morse_skbq_put(mq, &mq->skbq, skb, false, pfirst);
 			return;
 		}
@@ -338,7 +338,7 @@ static bool tx_skb_is_ps_filtered(struct morse_skbq *mq, struct sk_buff *skb,
 	struct morse_vif *mors_vif = ieee80211_vif_to_morse_vif(vif);
 
 	MORSE_WARN_ON_ONCE(FEATURE_ID_DEFAULT,
-			   !(tx_sts->flags & MORSE_TX_STATUS_FLAGS_PS_FILTERED));
+			   !(le32_to_cpu(tx_sts->flags) & MORSE_TX_STATUS_FLAGS_PS_FILTERED));
 
 	if (!mors_vif->supports_ps_filter) {
 		/* Do not rebuffer invalid pages, or on VIFs that do not support
@@ -365,7 +365,6 @@ static bool tx_skb_is_ps_filtered(struct morse_skbq *mq, struct sk_buff *skb,
 static void morse_skbq_tx_status_process(struct morse *mors, struct sk_buff *skb)
 {
 	int i;
-	int mismatch = 0;
 	struct morse_skb_tx_status *tx_sts = (struct morse_skb_tx_status *)skb->data;
 	int count = skb->len / sizeof(*tx_sts);
 
@@ -373,28 +372,27 @@ static void morse_skbq_tx_status_process(struct morse *mors, struct sk_buff *skb
 		struct sk_buff *tx_skb;
 		struct ieee80211_vif *vif;
 		struct morse_skbq *mq = __morse_skbq_match_tx_status_to_skbq(mors, tx_sts);
-		bool is_ps_filtered = (tx_sts->flags & MORSE_TX_STATUS_FLAGS_PS_FILTERED);
+		bool is_ps_filtered = (le32_to_cpu(tx_sts->flags) &
+								MORSE_TX_STATUS_FLAGS_PS_FILTERED);
 
 		if (!mq) {
 			MORSE_SKB_DBG(mors, "No pending skbq match found [pktid:%d chan:%d]\n",
 				      tx_sts->pkt_id, tx_sts->channel);
-			mismatch++;
 			continue;
 		}
 
 		vif = morse_get_vif_from_tx_status(mq->mors, tx_sts);
 
 		spin_lock_bh(&mq->lock);
-		tx_skb = __skbq_get_pending_by_id(mors, mq, tx_sts->pkt_id, vif);
+		tx_skb = __skbq_get_pending_by_id(mors, mq, le32_to_cpu(tx_sts->pkt_id), vif);
 		if (!tx_skb) {
 			MORSE_SKB_DBG(mors, "No pending pkt match found [pktid:%d chan:%d]\n",
 				      tx_sts->pkt_id, tx_sts->channel);
-			mismatch++;
 			spin_unlock_bh(&mq->lock);
 			continue;
 		}
 
-		if (tx_sts->flags & MORSE_TX_STATUS_PAGE_INVALID) {
+		if (le32_to_cpu(tx_sts->flags) & MORSE_TX_STATUS_PAGE_INVALID) {
 			/* Drop invalid SKBs */
 			mors->debug.page_stats.tx_status_page_invalid++;
 			__skbq_drop_pending_skb(mq, tx_skb, vif);
@@ -402,7 +400,7 @@ static void morse_skbq_tx_status_process(struct morse *mors, struct sk_buff *skb
 			continue;
 		}
 
-		if (tx_sts->flags & MORSE_TX_STATUS_DUTY_CYCLE_CANT_SEND) {
+		if (le32_to_cpu(tx_sts->flags) & MORSE_TX_STATUS_DUTY_CYCLE_CANT_SEND) {
 			/* Drop SKBs that can't be sent due to duty cycle restrictions  */
 			mors->debug.page_stats.tx_status_duty_cycle_cant_send++;
 			__skbq_drop_pending_skb(mq, tx_skb, vif);
@@ -423,8 +421,6 @@ static void morse_skbq_tx_status_process(struct morse *mors, struct sk_buff *skb
 		spin_unlock_bh(&mq->lock);
 	}
 
-	MORSE_SKB_DBG(mors, "TX status %d (%d mismatch)\n", count, mismatch);
-
 	if (mors->ps.enable &&
 	    !mors->ps.suspended && (mors->cfg->ops->skbq_get_tx_buffered_count(mors) == 0)) {
 		/* Evaluate ps to check if it was gated on a pending tx status */
@@ -441,7 +437,6 @@ static void morse_skbq_dispatch_work(struct work_struct *dispatch_work)
 	struct sk_buff_head skbq;
 	struct sk_buff *pfirst, *pnext;
 	u8 channel;
-	int count = 0;
 
 	__skb_queue_head_init(&skbq);
 
@@ -473,7 +468,6 @@ static void morse_skbq_dispatch_work(struct work_struct *dispatch_work)
 			morse_mac_skb_recv(mors, pfirst, &hdr->rx_status);
 			break;
 		}
-		count++;
 	}
 
 	/* rerun recv in case skbq was full and we couldn't copy data */
@@ -918,11 +912,12 @@ static struct sk_buff *__skbq_get_pending_by_id(struct morse *mors,
 		struct morse_buff_skb_header *hdr;
 
 		hdr = (struct morse_buff_skb_header *)pfirst->data;
-		if (hdr->tx_info.pkt_id == pkt_id) {
+		if (le32_to_cpu(hdr->tx_info.pkt_id) == pkt_id) {
 			ret = pfirst;
 			break;
 
-		} else if (hdr->tx_info.pkt_id < pkt_id && __has_pending_tx_skb_timed_out(pfirst)) {
+		} else if (le32_to_cpu(hdr->tx_info.pkt_id) < pkt_id &&
+					__has_pending_tx_skb_timed_out(pfirst)) {
 			/* Returned TX statuses may appear out-of-order during AMPDU */
 			MORSE_SKB_DBG(mors,
 				      "%s: pending TX SKB timed out [id:%d,chan:%d] (curr:%d)\n",
@@ -1072,7 +1067,7 @@ static struct morse_skbq_mon_ent *morse_skbq_mon_get(struct morse *mors,
 	struct morse_skbq_mon_ent *ent;
 	int i;
 
-	if (hdr->frame_control == 0xaa) {
+	if (hdr->frame_control == cpu_to_le16(0xaa)) {
 		/* Header has not been stripped */
 		hdr = (struct ieee80211_hdr *)(skb->data + sizeof(struct morse_buff_skb_header));
 		sa = ieee80211_get_SA(hdr);
@@ -1335,8 +1330,6 @@ static void morse_skb_header_put(const struct morse_buff_skb_header *hdr, u8 *bu
 	struct morse_buff_skb_header *buf_hdr = (struct morse_buff_skb_header *)buf;
 
 	memcpy(buf_hdr, hdr, sizeof(*hdr));
-	/* Adjust endianness */
-	buf_hdr->len = cpu_to_le16(buf_hdr->len);
 }
 
 struct sk_buff *morse_skbq_alloc_skb(struct morse_skbq *mq, unsigned int length)
@@ -1401,7 +1394,7 @@ int morse_skbq_skb_tx(struct morse_skbq *mq, struct sk_buff **skb_orig,
 				  mors->bus_ops->bulk_alignment);
 	hdr.sync = MORSE_SKB_HEADER_SYNC;
 	hdr.channel = channel;
-	hdr.len = skb->len;
+	hdr.len = cpu_to_le16(skb->len);
 	hdr.offset = data - (aligned_head + sizeof(hdr));
 	hdr.checksum_upper = 0;
 	hdr.checksum_lower = 0;
@@ -1481,7 +1474,7 @@ bool morse_validate_skb_checksum(u8 *data)
 	if (skb_hdr->channel == MORSE_SKB_CHAN_DATA &&
 	    (ieee80211_is_data(hdr->frame_control) ||
 		 ieee80211_is_data_qos(hdr->frame_control) ||
-		 morse_dot11ah_is_pv1_qos_data(hdr->frame_control))) {
+		 morse_dot11ah_is_pv1_qos_data(le16_to_cpu(hdr->frame_control)))) {
 		u16 data_len = sizeof(*skb_hdr) + QOS_HDR_SIZE + IEEE80211_CCMP_HDR_LEN;
 
 		len = min(len, data_len);

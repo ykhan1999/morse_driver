@@ -62,6 +62,10 @@ enum morse_vendor_attributes {
 	MORSE_VENDOR_ATTR_MGMT_FRAME_TYPE = 1,
 };
 
+struct morse_mesh_peer_addr_vendor_evt {
+	u8 addr[ETH_ALEN];
+} __packed;
+
 /** Morse vendor capability & operations IE */
 struct dot11_morse_vendor_caps_ops_ie {
 	u8 oui[3];
@@ -138,7 +142,7 @@ int morse_vendor_send_mgmt_vendor_ie_found_event(struct ieee80211_vif *vif, u16 
  * @vie Vendor IE which was found
  * @return int 0 on success else error code
  */
-int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_event *event);
+int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_cmd_evt_ocs_done *evt);
 
 /**
  * Send mesh peer addr netlink event
@@ -148,7 +152,8 @@ int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_eve
  *
  * Return: 0 on success else error code
  */
-int morse_vendor_send_peer_addr_event(struct ieee80211_vif *vif, struct morse_event *event);
+int morse_vendor_send_peer_addr_event(struct ieee80211_vif *vif,
+				      struct morse_mesh_peer_addr_vendor_evt *event);
 
 void morse_vendor_update_ack_timeout_on_assoc(struct morse *mors,
 					      struct ieee80211_vif *vif, struct ieee80211_sta *sta);

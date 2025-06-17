@@ -17,13 +17,13 @@ struct morse_yaps_hw_table {
 	/* Note: no flags actually defined yet, here for future expansion */
 	u8 flags;
 	u8 padding[3];
-	u32 ysl_addr;
-	u32 yds_addr;
-	u32 status_regs_addr;
+	__le32 ysl_addr;
+	__le32 yds_addr;
+	__le32 status_regs_addr;
 
 	/* Alloc pool sizes */
-	u16 tc_tx_pool_size;
-	u16 fc_rx_pool_size;
+	__le16 tc_tx_pool_size;
+	__le16 fc_rx_pool_size;
 	u8 tc_cmd_pool_size;
 	u8 tc_beacon_pool_size;
 	u8 tc_mgmt_pool_size;
@@ -39,8 +39,8 @@ struct morse_yaps_hw_table {
 	u8 fc_q_size;
 	u8 fc_done_q_size;
 
-	u16 yaps_reserved_page_size;
-	u16 reserved_unused;
+	__le16 yaps_reserved_page_size;
+	__le16 reserved_unused;
 } __packed;
 
 struct morse;

@@ -125,6 +125,15 @@ static inline struct morse_vif *morse_twt_to_morse_vif(struct morse_twt *twt)
 }
 
 /**
+ * @morse_twt_is_enabled() - Check if TWT is enabled on a VIF
+ *
+ * @mors_vif    Morse virtual interface
+ *
+ * Return:      True if TWT is enabled
+ */
+bool morse_twt_is_enabled(struct morse_vif *mors_vif);
+
+/**
  * @morse_twt_event_queue_purge() - Remove all events for a STA addr from the event queue
  *
  * @mors       Morse device
@@ -239,29 +248,12 @@ void morse_twt_dump_sta_agreements(struct seq_file *file, struct morse_vif *mors
 void morse_twt_process_pending_cmds(struct morse *mors, struct morse_vif *mors_vif);
 
 /**
- * @morse_twt_queue_event() - Adds a TWT event to the queue
- *
- * @mors        Morse device
- * @mors_vif    Morse virtual interface
- * @event       The event to queue
- */
-void morse_twt_queue_event(struct morse *mors,
-			   struct morse_vif *mors_vif, struct morse_twt_event *event);
-
-/**
  * morse_twt_handle_event() - Process a TWT event
  *
  * @mors_vif    Morse virtual interface
  * @addr        Address to filter on, if NULL proccess all events
  */
 void morse_twt_handle_event(struct morse_vif *mors_vif, u8 *addr);
-
-/**
- * morse_twt_handle_event_work() - Process TWT events that are queued (can also be called directly)
- *
- * @work	The work structure for the TWT event queue
- */
-void morse_twt_handle_event_work(struct work_struct *work);
 
 /**
  * @morse_mac_process_rx_twt_mgmt() - Process TWT IEs in management frames
@@ -287,42 +279,29 @@ void morse_mac_process_twt_action_tx_finish(struct morse *mors, struct ieee80211
 			const struct sk_buff *skb);
 
 /**
- * morse_twt_init() - Initialise TWT
+ * morse_twt_init_vif() - Initialise TWT for a VIF
  *
- * @mors    Morse device
- *
- * @return 0 on success, else error code
+ * @mors		Morse device
+ * @mors_vif		Morse virtual interface
+ * @enable_twt          True if TWT is configured
+ * @is_ap		True if the interface is in AP mode
+ * @is_sta		True if the interface is in STA mode
+ * @ps_is_enabled	True if power save is enabled
+ * @ps_is_offloaded	True if power save offload is enabled
+ * @connection_monitor_is_enabled	True if the MAC80211 connection monitor is enabled
  */
-int morse_twt_init(struct morse *mors);
+void morse_twt_init_vif(struct morse *mors, struct morse_vif *mors_vif,
+			bool enable_twt, bool is_ap, bool is_sta,
+			bool ps_is_enabled, bool ps_is_offloaded,
+			bool connection_monitor_is_enabled);
 
 /**
- * morse_twt_init_vif() - Initialise TWT for a VIF, this should be done after morse_twt_init()
+ * morse_twt_finish_vif() - Initialise TWT for a VIF
  *
  * @mors       Morse device
  * @mors_vif   Morse virtual interface
- *
- * @return 0 on success, else error code
  */
-int morse_twt_init_vif(struct morse *mors, struct morse_vif *mors_vif);
-
-/**
- * morse_twt_finish_vif() - Initialise TWT for a VIF, this should be done before morse_twt_finish()
- *
- * @mors       Morse device
- * @mors_vif   Morse virtual interface
- *
- * @return 0 on success, else error code
- */
-int morse_twt_finish_vif(struct morse *mors, struct morse_vif *mors_vif);
-
-/**
- * morse_twt_finish() - Finish TWT
- *
- * @mors	Morse device
- *
- * @return 0 on success, else error code
- */
-int morse_twt_finish(struct morse *mors);
+void morse_twt_finish_vif(struct morse *mors, struct morse_vif *mors_vif);
 
 /**
  * morse_twt_initialise_agreement() - Initialises the twt agreement that needs to be sent to the FW
@@ -345,7 +324,8 @@ int morse_twt_initialise_agreement(struct morse_twt_agreement_data *twt_data, u8
  *
  * @return 0 on success, else error code
  */
-int morse_process_twt_cmd(struct morse *mors, struct morse_vif *mors_vif, struct morse_cmd *cmd);
+int morse_process_twt_cmd(struct morse *mors, struct morse_vif *mors_vif,
+			  struct morse_cmd_req *cmd);
 
  /**
   * morse_dot11_is_twt_setup_action_frame() - Checks if TWT setup action frame

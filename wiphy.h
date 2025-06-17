@@ -99,7 +99,7 @@ void morse_wiphy_rx(struct morse *mors, struct sk_buff *skb);
  *
  * Return: 0 on success, else error.
  */
-int morse_wiphy_scan_result(struct morse *mors, struct morse_evt_scan_result *result);
+int morse_wiphy_scan_result(struct morse *mors, struct morse_cmd_evt_scan_result *result);
 
 /**
  * morse_wiphy_scan_done() -  Mark scan as complete
@@ -116,9 +116,17 @@ void morse_wiphy_scan_done(struct morse *mors, bool aborted);
 void morse_wiphy_connected(struct morse *mors, const u8 *bssid);
 
 /**
- * morse_wiphy_connected() -  Mark connection as lost
+ * morse_wiphy_disconnected() -  Mark connection as lost
  * @mors: morse device instance
  */
 void morse_wiphy_disconnected(struct morse *mors);
+
+/**
+ * morse_wiphy_traffic_control() -  Pause or resume traffic
+ * @mors: morse device instance
+ * @pause_data_traffic: true to pause, false to resume
+ * @sources: source of traffic control
+ */
+int morse_wiphy_traffic_control(struct morse *mors, bool pause_data_traffic, int sources);
 
 #endif /* !_MORSE_WIPHY_H_ */

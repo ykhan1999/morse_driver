@@ -8,9 +8,9 @@
 #ifndef _MORSE_S1G_RADIOTAP_H_
 #define _MORSE_S1G_RADIOTAP_H_
 
-#define	IEEE80211_CHAN_700MHZ	0x0002	/* 700 MHz spectrum channel */
-#define	IEEE80211_CHAN_800MHZ	0x0004	/* 800 MHz spectrum channel */
-#define	IEEE80211_CHAN_900MHZ	0x0008	/* 900 MHz spectrum channel */
+#define	IEEE80211_CHAN_700MHZ	0x0001	/* 700 MHz spectrum channel */
+#define	IEEE80211_CHAN_800MHZ	0x0002	/* 800 MHz spectrum channel */
+#define	IEEE80211_CHAN_900MHZ	0x0004	/* 900 MHz spectrum channel */
 
 #define IEEE80211_RADIOTAP_HALOW_FLAGS_S1G_NDP_CMAC	0x0002
 #define IEEE80211_RADIOTAP_HALOW_FLAGS_S1G_NDP_CONTROL	0x0004

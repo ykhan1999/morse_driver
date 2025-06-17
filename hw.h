@@ -9,6 +9,8 @@
  */
 
 #include "chip_if.h"
+#include "morse_commands.h"
+#include "led.h"
 
 /* To be moved to sdio.c */
 #define MORSE_REG_ADDRESS_BASE		0x10000
@@ -274,6 +276,13 @@ struct morse_hw_cfg {
 	int (*get_encoded_country)(struct morse *mors);
 
 	/**
+	 * Set the slow clock source selection mode
+	 *
+	 * @return error code
+	 */
+	int (*set_slow_clock_mode)(struct morse *mors, enum morse_cmd_slow_clock_mode mode);
+
+	/**
 	 * Invoke prior to initiating a coredump to prepare the chip
 	 *
 	 * @return error code
@@ -288,12 +297,41 @@ struct morse_hw_cfg {
 	int (*post_coredump_hook)(struct morse *mors, enum morse_coredump_method method);
 
 	/**
+	 * Invoke prior to performing non-destructive-reset of the chip.
+	 *
+	 */
+	void (*pre_firmware_ndr)(struct morse *mors);
+
+	/**
+	 * Invoke after performing non-destructive-reset of the chip.
+	 *
+	 */
+	void (*post_firmware_ndr)(struct morse *mors);
+
+	/**
 	 * enable_ext_xtal_delay: Enable external XTAL wait delays during bus transfers.
 	 *
 	 * @param mors: Morse context object
 	 * @param enable: true if delay is required
 	 */
 	void (*enable_ext_xtal_delay)(struct morse *mors, bool enable);
+
+	/**
+	 * Initialise gpio for output
+	 *
+	 * @return error code
+	 */
+	int (*gpio_enable_output)(struct morse *mors, int pin_num, bool enable);
+
+	/**
+	 * Set or clear gpio output
+	 */
+	void (*gpio_write_output)(struct morse *mors, int pin_num, bool value);
+
+	/**
+	 * @led_group: Contains information pertaining to gpio-attached LEDs
+	 */
+	struct morse_led_group led_group;
 
 	/**
 	 * @bus_double_read: Decide if the bus workaround is required to recover
@@ -339,6 +377,7 @@ struct morse_chip_series {
 int morse_hw_irq_enable(struct morse *mors, u32 irq, bool enable);
 int morse_hw_irq_handle(struct morse *mors);
 int morse_hw_irq_clear(struct morse *mors);
+int morse_hw_toggle_aon_latch(struct morse *mors);
 
 enum sdio_burst_mode {
 	SDIO_WORD_BURST_DISABLE = 0,	/* Intentionally duplicate to make it clear it's disabled */

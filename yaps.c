@@ -177,7 +177,7 @@ static int morse_yaps_read_pkt(struct morse_yaps *yaps, struct sk_buff *skb)
 	}
 
 	/* Check there is room in the skbq */
-	skb_len = sizeof(*hdr) + le16_to_cpu(hdr->offset) + le16_to_cpu(hdr->len);
+	skb_len = sizeof(*hdr) + hdr->offset + le16_to_cpu(hdr->len);
 	skb_bytes_remaining = morse_skbq_space(mq);
 
 #ifdef MORSE_YAPS_SUPPORTS_BENCHMARK
@@ -552,12 +552,6 @@ void morse_yaps_work(struct work_struct *work)
 	}
 
 exit:
-	/* This bit is set when the SDIO interrupt lock up is detected */
-	if (test_and_clear_bit(MORSE_YAPS_STATUS_REG_READ_PEND, flags)) {
-		/* This operation will clear the SDIO interrupt lock up */
-		yaps->ops->update_status(yaps);
-	}
-
 	if (ps_bus_timeout_ms)
 		morse_ps_bus_activity(mors, ps_bus_timeout_ms);
 

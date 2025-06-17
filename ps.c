@@ -106,7 +106,6 @@ static irqreturn_t morse_ps_irq_handle(int irq, void *arg)
 	struct morse_ps *mps = (struct morse_ps *)arg;
 	struct morse *mors = container_of(mps, struct morse, ps);
 
-	MORSE_PS_DBG(mors, "%s: Async wakeup request IRQ - waking up\n", __func__);
 	/* There is a delay in waking up, so pass to a queue */
 	queue_work(mors->chip_wq, &mps->async_wake_work);
 
@@ -192,15 +191,12 @@ static int morse_ps_evaluate(struct morse_ps *mps)
 
 static void morse_ps_evaluate_work(struct work_struct *work)
 {
-	struct morse_ps *mps = container_of(work,
-					    struct morse_ps, delayed_eval_work.work);
-	struct morse *mors = container_of(mps, struct morse, ps);
+	struct morse_ps *mps = container_of(work, struct morse_ps, delayed_eval_work.work);
 
 	if (!mps->enable)
 		return;
 
 	mutex_lock(&mps->lock);
-	MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
 	morse_ps_evaluate(mps);
 	mutex_unlock(&mps->lock);
 }
@@ -220,7 +216,6 @@ int morse_ps_enable(struct morse *mors)
 		ret = -EFAULT;
 	} else {
 		mps->wakers--;
-		MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
 		ret = morse_ps_evaluate(mps);
 	}
 
@@ -239,7 +234,6 @@ int morse_ps_disable(struct morse *mors)
 
 	mutex_lock(&mps->lock);
 	mps->wakers++;
-	MORSE_PS_DBG(mors, "%s: Wakers: %d\n", __func__, mps->wakers);
 	ret = morse_ps_evaluate(mps);
 	mutex_unlock(&mps->lock);
 

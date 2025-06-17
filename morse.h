@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  *
  */
+
 #include <net/mac80211.h>
 #include <linux/workqueue.h>
 #include <linux/interrupt.h>
@@ -14,6 +15,7 @@
 #include <linux/types.h>
 #include <linux/version.h>
 #include <linux/crc32.h>
+#include <linux/notifier.h>
 #if KERNEL_VERSION(4, 9, 81) < LINUX_VERSION_CODE
 #include <linux/nospec.h>
 #endif
@@ -495,7 +497,7 @@ struct morse_mesh_config {
 	u8 mesh_id_len;
 
 	/** Mesh ID of the network */
-	char mesh_id[IEEE80211_MAX_SSID_LEN];
+	u8 mesh_id[IEEE80211_MAX_SSID_LEN];
 
 	/** Mode of mesh beaconless operation */
 	u8 mesh_beaconless_mode;
@@ -520,6 +522,16 @@ struct morse_mesh_config_list {
 	struct morse_mbca_config mbca;
 	/** Protect Mesh config updates */
 	spinlock_t lock;
+};
+
+/**
+ * enum morse_scan_state_flags - Scan state flags in fullmac mode.
+ */
+enum morse_scan_state_flags {
+	/** @MORSE_SCAN_STATE_SCANNING: Scan is in progress. */
+	MORSE_SCAN_STATE_SCANNING,
+	/** @MORSE_SCAN_STATE_ABORTED: An error occurred during the scan. */
+	MORSE_SCAN_STATE_ABORTED,
 };
 
 /**
@@ -806,6 +818,36 @@ struct morse_vif {
 	 *             See &enum morse_sme_state_flags for bit numbers.
 	 */
 	unsigned long sme_state;
+
+	/** @connected_bss: The BSS we are connected to, when connected in fullmac mode. */
+	struct cfg80211_bss *connected_bss;
+
+	/** @connected_work: Work item for handling connected events (fullmac only). */
+	struct work_struct connected_work;
+
+	/** @disconnected_work: Work item for handling disconnected events (fullmac only). */
+	struct work_struct disconnected_work;
+
+	/* ARP filtering related fields (fullmac only) */
+	struct {
+		/**
+		 * @arp_filter.ifa_notifier: Notifier for IPv4 address changes.
+		 */
+		struct notifier_block ifa_notifier;
+		/**
+		 * @arp_filter.addr_list: List of IPv4 addresses for ARP filtering/offload.
+		 *                        Equivalent to mac80211's arp_addr_list on
+		 *                        &struct ieee80211_vif.
+		 */
+		__be32 addr_list[IEEE80211_BSS_ARP_ADDR_LIST_LEN];
+		/**
+		 * @arp_filter.addr_cnt: Number of IPv4 addresses for ARP filtering/offload.
+		 *                       Note this may be longer than the length of
+		 *                       %arp_filter.addr_list. Equivalent to mac80211's
+		 *                       arp_addr_cnt on &struct ieee80211_vif.
+		 */
+		int addr_cnt;
+	} arp_filter;
 };
 
 struct morse_debug {
@@ -918,7 +960,7 @@ struct mcast_filter {
 	/* Integer representation of the last four bytes of a multicast MAC address.
 	 * The first two bytes are always 0x0100 (IPv4) or 0x3333 (IPv6).
 	 */
-	u32 addr_list[];
+	__le32 addr_list[];
 };
 
 /** State flags for managing state of mors object */
@@ -979,10 +1021,32 @@ struct morse {
 	/* wiphy device registered with cfg80211 */
 	struct wiphy *wiphy;
 
+	/** @workqueue: Workqueue for fullmac work items. */
+	struct workqueue_struct *wiphy_wq;
+
 	/** @scan_req: pointer to the current scan request which is in progress,
 	 * or NULL if no scan is in progress (fullmac only).
 	 */
 	struct cfg80211_scan_request *scan_req;
+
+	/** @scan_state: Bit field of state flags for scanning in fullmac mode.
+	 *               See &enum morse_scan_state_flags for bit numbers.
+	 */
+	unsigned long scan_state;
+
+	/** @scan_done_work: Work item for handling scan_done events (fullmac only). */
+	struct work_struct scan_done_work;
+
+	/**
+	 * @rts_allowed: Whether RTS can be enabled (fullmac only).
+	 */
+	bool rts_allowed;
+
+	/**
+	 * @orig_rts_threshold: If RTS is forcibly disabled, this saves the previously configured
+	 *                      RTS threshold so it can be restored later (fullmac only).
+	 */
+	u32 orig_rts_threshold;
 
 	/* Extra padding to insert at the start of each tx packet */
 	u8 extra_tx_offset;
@@ -1076,6 +1140,7 @@ struct morse {
 	bool enable_mbssid_ie;
 	/* Hardware scan is enabled/disabled */
 	bool enable_hw_scan;
+	bool enable_sched_scan;
 
 	/* Type of rate control method in use */
 	enum morse_rc_method rc_method;

@@ -529,8 +529,12 @@ static bool morse_rc_use_basic_rates(struct ieee80211_sta *sta, struct sk_buff *
 	if (!sta)
 		return true;
 
+	if (ieee80211_is_qos_nullfunc(hdr->frame_control) ||
+	    ieee80211_is_nullfunc(hdr->frame_control))
+		return true;
+
 	if (!ieee80211_is_data_qos(hdr->frame_control) &&
-		     !morse_dot11ah_is_pv1_qos_data(hdr->frame_control))
+	    !morse_dot11ah_is_pv1_qos_data(le16_to_cpu(hdr->frame_control)))
 		return true;
 
 	/* Use basic rates for EAPOL exchanges or when instructed */
@@ -694,7 +698,7 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 
 	vif = txi->control.vif ? txi->control.vif : morse_get_vif_from_tx_status(mors, tx_sts);
 
-	if (morse_dot11ah_is_pv1_qos_data(hdr->frame_control))
+	if (morse_dot11ah_is_pv1_qos_data(le16_to_cpu(hdr->frame_control)))
 		sta = morse_pv1_find_sta(vif, (struct dot11ah_mac_pv1_hdr *)hdr);
 	else
 		sta = ieee80211_find_sta(vif, hdr->addr1);
@@ -748,8 +752,8 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 	}
 
 	if (tx_sts->ampdu_info) {
-		agg_success = MORSE_TXSTS_AMPDU_INFO_GET_SUC(tx_sts->ampdu_info);
-		agg_packets = MORSE_TXSTS_AMPDU_INFO_GET_LEN(tx_sts->ampdu_info);
+		agg_success = MORSE_TXSTS_AMPDU_INFO_GET_SUC(le16_to_cpu(tx_sts->ampdu_info));
+		agg_packets = MORSE_TXSTS_AMPDU_INFO_GET_LEN(le16_to_cpu(tx_sts->ampdu_info));
 		morse_rc_sta_set_rates(mors, msta, &rates, attempts, true, agg_success,
 				       agg_packets - agg_success);
 	} else {
@@ -759,11 +763,11 @@ void morse_rc_sta_feedback_rates(struct morse *mors,
 exit:
 	ieee80211_tx_info_clear_status(txi);
 
-	if (!(tx_sts->flags & MORSE_TX_STATUS_FLAGS_NO_ACK) &&
+	if (!(le32_to_cpu(tx_sts->flags) & MORSE_TX_STATUS_FLAGS_NO_ACK) &&
 	    !(txi->flags & IEEE80211_TX_CTL_NO_ACK))
 		txi->flags |= IEEE80211_TX_STAT_ACK;
 
-	if (tx_sts->flags & MORSE_TX_STATUS_FLAGS_PS_FILTERED) {
+	if (le32_to_cpu(tx_sts->flags) & MORSE_TX_STATUS_FLAGS_PS_FILTERED) {
 		mors->debug.page_stats.tx_ps_filtered++;
 		txi->flags |= IEEE80211_TX_STAT_TX_FILTERED;
 
@@ -850,4 +854,29 @@ void morse_rc_sta_state_check(struct morse *mors,
 		MORSE_RC_INFO(mors, "Remove stale sta from rc list\n");
 		morse_rc_sta_remove(mors, sta);
 	}
+}
+
+bool morse_rc_get_enable_fixed_rate(void)
+{
+	return enable_fixed_rate;
+}
+
+int morse_rc_get_fixed_bandwidth(void)
+{
+	return fixed_bw;
+}
+
+int morse_rc_get_fixed_mcs(void)
+{
+	return fixed_mcs;
+}
+
+int morse_rc_get_fixed_ss(void)
+{
+	return fixed_ss;
+}
+
+int morse_rc_get_fixed_guard(void)
+{
+	return fixed_guard;
 }

@@ -49,6 +49,12 @@
 #define WLAN_EID_S1G_RELAY_ACTIVATION			(236)
 
 #if KERNEL_VERSION(5, 10, 11) > MAC80211_VERSION_CODE
+
+#define WLAN_EID_AID_REQUEST				(210)
+#define WLAN_EID_AID_RESPONSE				(211)
+#endif
+
+#if KERNEL_VERSION(5, 8, 0) > MAC80211_VERSION_CODE
 #define IEEE80211_NDP_FTYPE_CF_END			(0)
 #define IEEE80211_NDP_FTYPE_PS_POLL			(1)
 #define IEEE80211_NDP_FTYPE_ACK				(2)
@@ -59,8 +65,6 @@
 #define IEEE80211_NDP_FTYPE_PREQ			(7)
 
 #define WLAN_EID_REDUCED_NEIGHBOR_REPORT		(201)
-#define WLAN_EID_AID_REQUEST				(210)
-#define WLAN_EID_AID_RESPONSE				(211)
 #define WLAN_EID_S1G_BCN_COMPAT				(213)
 #define WLAN_EID_S1G_SHORT_BCN_INTERVAL			(214)
 #define WLAN_EID_S1G_CAPABILITIES			(217)
@@ -471,12 +475,6 @@ struct dot11ah_s1g_auth_control_ie {
 #define MORSE_OPERATING_CHAN_DEFAULT 38
 #define MORSE_OPERATING_CH_WIDTH_DEFAULT 2
 #define MORSE_PRIM_CH_WIDTH_DEFAULT 2
-
-struct country_ie_triplet {
-	u8 first_chan;
-	u8 chan_num;
-	u8 max_eirp_dbm;
-} __packed;
 
 struct country_operating_triplet {
 	u8 op_triplet_id;

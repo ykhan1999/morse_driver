@@ -323,7 +323,8 @@ static int morse_sdio_regl_write(struct morse_sdio *sdio, u32 address, u32 value
 
 	bus_trace_log(&sdio->trace, BUS_TRACE_EVENT_ID_REG_WRITE, func_to_use->num, address, 4);
 	address &= 0x0000FFFF;	/* remove base and keep offset */
-	sdio_writel(func_to_use, value, address, (int *)&ret);
+	sdio_writel(func_to_use, (__force u32)cpu_to_le32(value),
+				(__force u32)cpu_to_le32(address), (int *)&ret);
 
 	/* return written size */
 	if (ret)
@@ -358,7 +359,7 @@ static int morse_sdio_regl_read(struct morse_sdio *sdio, u32 address, u32 *value
 
 	bus_trace_log(&sdio->trace, BUS_TRACE_EVENT_ID_REG_READ, func_to_use->num, address, 4);
 	address &= 0x0000FFFF;	/* remove base and keep offset */
-	*value = sdio_readl(func_to_use, address, (int *)&ret);
+	*value = sdio_readl(func_to_use,  (__force u32)cpu_to_le32(address), (int *)&ret);
 	/* return read size */
 	if (ret)
 		sdio_log_err(sdio, "readl", func_to_use->num, address, sizeof(u32), ret);
@@ -583,9 +584,10 @@ static int morse_sdio_reg32_read(struct morse *mors, u32 address, u32 *val)
 	struct morse_sdio *sdio = (struct morse_sdio *)mors->drv_priv;
 
 	ret = morse_sdio_regl_read(sdio, address, val);
-	if (ret == sizeof(*val))
+	if (ret == sizeof(*val)) {
+		*val = le32_to_cpup((__le32 *)val);
 		return 0;
-
+	}
 	return -EIO;
 }
 

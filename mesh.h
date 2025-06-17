@@ -101,42 +101,6 @@ struct beacon_timing_element {
 	u8 beacon_timing_info_list[];
 };
 
-struct morse_cmd_mesh_config {
-	struct morse_cmd_header hdr;
-	/** Mesh specific config params */
-	struct morse_mesh_config cfg;
-} __packed;
-
-struct morse_cmd_mbca {
-	struct morse_cmd_header hdr;
-	/** Configuration to enable or disable MBCA TBTT Selection and Adjustment*/
-	u8 mbca_config;
-
-	/** Beacon Timing Element Report interval */
-	u8 beacon_timing_report_interval;
-
-	/** Minimum gap between our beacon and neighbor beacons */
-	u8 min_beacon_gap_ms;
-
-	/** Initial scan duration to find neighbor mesh peers in the MBSS */
-	u16 mbss_start_scan_duration_ms;
-
-	/** TBTT adjustment timer interval in LMAC firmware */
-	u16 tbtt_adj_interval_ms;
-} __packed;
-
-struct morse_cmd_dynamic_peering {
-	struct morse_cmd_header hdr;
-	/** Configuration to enable or disable mesh dynamic peering */
-	u8 enabled;
-
-	/** RSSI margin to consider while selecting a peer to kick out */
-	u8 rssi_margin;
-
-	/** Duration in seconds, a kicked out peer is not allowed peering */
-	u32 blacklist_timeout;
-} __packed;
-
 /**
  * enum plink_action_field - action codes of mesh peer link action frames.
  * @PLINK_OPEN: peer link open frame
@@ -172,9 +136,12 @@ static inline u8 *morse_dot11_mpm_frame_ies(struct ieee80211_mgmt *mesh_mpm_frm)
 		(morse_dot11_is_mpm_confirm_frame(mesh_mpm_frm) ? 2 : 0));
 }
 
- /** Retuns true if the action frame is Mesh Peering Management (MPM) Frame. */
+ /** Returns true if the action frame is Mesh Peering Management (MPM) Frame. */
 static inline bool morse_dot11_is_mpm_frame(struct ieee80211_mgmt *mgmt)
 {
+	/* MPM frames are not protected */
+	if (ieee80211_has_protected(mgmt->frame_control))
+		return false;
 	/*
 	 * Check for Peering open and confirm frames only as peering close frame
 	 * will not have any S1G IEs
@@ -229,7 +196,7 @@ int morse_dot11_get_mpm_ampe_len(struct sk_buff *skb);
  * Return: 0 on success and error code on failure
  */
 int morse_cmd_set_mesh_config(struct morse_vif *mors_vif,
-			      struct morse_cmd_mesh_config *mesh_config,
+			      struct morse_cmd_req_set_mesh_config *mesh_config,
 			      struct morse_mesh_config_list *stored_config);
 
 /**
@@ -319,7 +286,8 @@ int morse_cmd_cfg_mesh_bss(struct morse_vif *mors_vif, bool stop_mesh);
  *
  * Return: 0 on success and error code on failure
  */
-int morse_cmd_process_mbca_conf(struct morse_vif *mors_vif, struct morse_cmd_mbca *mbca);
+int morse_cmd_process_mbca_conf(struct morse_vif *mors_vif,
+				struct morse_cmd_req_set_mcba_conf *mbca);
 
 /**
  * morse_cmd_process_dynamic_peering_conf() - Process mesh dynamic peering configuration
@@ -331,7 +299,7 @@ int morse_cmd_process_mbca_conf(struct morse_vif *mors_vif, struct morse_cmd_mbc
  * Return: 0 on success and error code on failure
  */
 int morse_cmd_process_dynamic_peering_conf(struct morse_vif *mors_vif,
-					   struct morse_cmd_dynamic_peering *conf);
+					   struct morse_cmd_req_dynamic_peering_config *conf);
 
 /**
  * morse_mac_process_mesh_tx_mgmt() - Process Tx mgmt frame on Mesh interface

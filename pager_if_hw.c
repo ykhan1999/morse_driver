@@ -147,7 +147,6 @@ static int _morse_pager_hw_pop(struct morse_pager *pager,
 	u32 pop_val;
 
 	ret = morse_reg32_read(pager->mors, aux_data->pop_addr, &pop_val);
-	pop_val = le32_to_cpu(pop_val);
 
 	if (!ret) {
 		/* Pager has no pages left */
@@ -200,7 +199,7 @@ static int _morse_pager_hw_put(struct morse_pager *pager,
 	int ret;
 
 	pageset_trace_log(pager, PAGESET_TRACE_EVENT_ID_PUT_PAGE, page->addr);
-	ret = morse_reg32_write(pager->mors, aux_data->put_addr, cpu_to_le32(page->addr));
+	ret = morse_reg32_write(pager->mors, aux_data->put_addr, page->addr);
 
 	if (!ret) {
 		page->addr = 0;
@@ -400,7 +399,7 @@ int morse_pager_hw_pagesets_init(struct morse *mors)
 		}
 
 		ret = morse_pager_init(mors, pager,
-				       __le32_to_cpu(pager_entry[i].page_size),
+				       __le16_to_cpu(pager_entry[i].page_size),
 				       pager_entry[i].flags, i);
 		if (ret) {
 			MORSE_ERR(mors, "morse_pager_init failed %d\n", ret);

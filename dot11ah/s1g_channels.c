@@ -420,7 +420,7 @@ static enum morse_dot11ah_region morse_reg_get_region(const char *alpha)
 	return REGION_UNSET;
 }
 
-struct morse_dot11ah_channel *lookup_s1g_chan_from_5g_chan(int chan_5g)
+static struct morse_dot11ah_channel *lookup_s1g_chan_from_5g_chan(int chan_5g)
 {
 	int ch;
 

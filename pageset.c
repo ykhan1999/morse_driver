@@ -525,7 +525,8 @@ static int morse_pageset_read(struct morse_pageset *pageset)
 			  __func__, hdr->offset, hdr->len, page.addr);
 
 		/* Should we actually do that, or just fail the page and go to exit_return_page? */
-		hdr->offset = (hdr->len & 0x03) ? (4 - (unsigned long)(hdr->len & 3)) : 0;
+		hdr->offset = (le16_to_cpu(hdr->len) & 0x03) ?
+			(4 - (unsigned long)(le16_to_cpu(hdr->len) & 3)) : 0;
 	}
 
 	/* Get correct skbq for the data based on the declared channel */
@@ -557,7 +558,7 @@ static int morse_pageset_read(struct morse_pageset *pageset)
 	}
 
 	/* Read of page can be greater than actual size of data - so trim */
-	skb_len = sizeof(*hdr) + le16_to_cpu(hdr->offset) + le16_to_cpu(hdr->len);
+	skb_len = sizeof(*hdr) + hdr->offset + le16_to_cpu(hdr->len);
 	skb_trim(skb, skb_len);
 
 #ifdef CONFIG_MORSE_IPMON

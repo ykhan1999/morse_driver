@@ -31,12 +31,12 @@ morse_vendor_cmd_to_morse(struct wiphy *wiphy, struct wireless_dev *wdev,
 	struct morse *mors = morse_wiphy_to_morse(wiphy);
 	int skb_len;
 	int dataout_len;
-	struct morse_cmd_vendor *datain;
-	struct morse_resp_vendor *dataout;
+	struct morse_cmd_req_vendor *datain;
+	struct morse_cmd_resp_vendor *dataout;
 	struct ieee80211_vif *vif = NULL;
 	struct morse_vif *mors_vif;
 
-	if (!data || data_len < sizeof(struct morse_cmd))
+	if (!data || data_len < sizeof(struct morse_cmd_req))
 		return -EINVAL;
 
 	datain = kzalloc(sizeof(*datain), GFP_KERNEL);
@@ -61,11 +61,11 @@ morse_vendor_cmd_to_morse(struct wiphy *wiphy, struct wireless_dev *wdev,
 	}
 
 	skb_len = skb->len;
-	dataout = (struct morse_resp_vendor *)skb_put(skb, sizeof(*dataout));
+	dataout = (struct morse_cmd_resp_vendor *)skb_put(skb, sizeof(*dataout));
 
 	mutex_lock(&mors->lock);
 	if (wdev)
-		morse_cmd_vendor(mors, vif, datain, data_len, dataout, &dataout_len);
+		morse_req_vendor(mors, vif, datain, data_len, dataout, &dataout_len);
 	else
 		morse_wiphy_cmd_vendor(mors, datain, data_len, dataout, &dataout_len);
 	mutex_unlock(&mors->lock);
@@ -441,27 +441,30 @@ err:
 	return ret;
 }
 
-int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_event *event)
+int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_cmd_evt_ocs_done *evt)
 {
 	struct wireless_dev *wdev;
 	struct sk_buff *skb;
 	int ret;
+	size_t ocs_data_size = sizeof(*evt) - sizeof(evt->hdr);
 
 	if (!vif)
 		return -EIO;
 
 	wdev = ieee80211_vif_to_wdev(vif);
 
-	event->ocs_done_evt.time_listen = le64_to_cpu(event->ocs_done_evt.time_listen);
-	event->ocs_done_evt.time_rx = le64_to_cpu(event->ocs_done_evt.time_rx);
+	/* cast to prevent warnings from Sparse */
+	evt->time_listen = (__force __le64)le64_to_cpu(evt->time_listen);
+	evt->time_rx = (__force __le64)le64_to_cpu(evt->time_rx);
 
-	skb = cfg80211_vendor_event_alloc(wdev->wiphy, NULL, sizeof(event->ocs_done_evt),
+	skb = cfg80211_vendor_event_alloc(wdev->wiphy, NULL, ocs_data_size,
 					  MORSE_VENDOR_EVENT_OCS_DONE, GFP_KERNEL);
 	if (!skb)
 		return -ENOMEM;
 
-	ret = nla_put(skb, MORSE_VENDOR_ATTR_DATA, sizeof(event->ocs_done_evt),
-		      &event->ocs_done_evt);
+	/* Offset ocs evt pointer so hdr data is not passed to cfg80211 */
+	ret = nla_put(skb, MORSE_VENDOR_ATTR_DATA, ocs_data_size,
+		(void *)((char *)evt + sizeof(evt->hdr)));
 	if (ret < 0) {
 		kfree_skb(skb);
 		return ret;
@@ -471,7 +474,8 @@ int morse_vendor_send_ocs_done_event(struct ieee80211_vif *vif, struct morse_eve
 	return ret;
 }
 
-int morse_vendor_send_peer_addr_event(struct ieee80211_vif *vif, struct morse_event *event)
+int morse_vendor_send_peer_addr_event(struct ieee80211_vif *vif,
+				      struct morse_mesh_peer_addr_vendor_evt *peer_addr_evt)
 {
 	struct wireless_dev *wdev;
 	struct sk_buff *skb;
@@ -482,13 +486,13 @@ int morse_vendor_send_peer_addr_event(struct ieee80211_vif *vif, struct morse_ev
 
 	wdev = ieee80211_vif_to_wdev(vif);
 
-	skb = cfg80211_vendor_event_alloc(wdev->wiphy, NULL, sizeof(event->peer_addr_evt),
+	skb = cfg80211_vendor_event_alloc(wdev->wiphy, NULL, sizeof(*peer_addr_evt),
 					  MORSE_VENDOR_EVENT_MESH_PEER_ADDR, GFP_KERNEL);
 	if (!skb)
 		return -ENOMEM;
 
-	ret = nla_put(skb, MORSE_VENDOR_ATTR_DATA, sizeof(event->peer_addr_evt),
-		      &event->peer_addr_evt);
+	ret = nla_put(skb, MORSE_VENDOR_ATTR_DATA, sizeof(*peer_addr_evt),
+		      peer_addr_evt);
 	if (ret < 0) {
 		kfree_skb(skb);
 		return ret;

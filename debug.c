@@ -6,7 +6,6 @@
  */
 
 #include "morse.h"
-#include "debug.h"
 #include "trace.h"
 #include "mac.h"
 #include "watchdog.h"
@@ -592,13 +591,21 @@ static ssize_t morse_debug_watchdog_write(struct file *file, const char __user *
 {
 	struct morse *mors = file->private_data;
 
-	if (strncmp(user_buf, "start", 5) == 0) {
-		morse_watchdog_start(mors);
-	} else if (strncmp(user_buf, "stop", 4) == 0) {
+	/* Length of the longest string compared ("disable" = 7) + a null terminator */
+	char k_buf[8] = {0};
+
+	/* Expect at least the smallest command string from userspace */
+	if (copy_from_user(k_buf, user_buf, sizeof(k_buf) - 1) > (sizeof(k_buf) - strlen("stop"))) {
+		pr_info
+		    ("[watchdog] Could not access user buf\n");
+		return -EFAULT;
+	} else if (strcmp(k_buf, "stop") == 0) {
 		morse_watchdog_stop(mors);
-	} else if (strncmp(user_buf, "refresh", 7) == 0) {
+	} else if (strcmp(k_buf, "start") == 0) {
+		morse_watchdog_start(mors);
+	} else if (strcmp(k_buf, "refresh") == 0) {
 		morse_watchdog_refresh(mors);
-	} else if (strncmp(user_buf, "disable", 7) == 0) {
+	} else if (strcmp(k_buf, "disable") == 0) {
 		morse_watchdog_cleanup(mors);
 	} else {
 		pr_info

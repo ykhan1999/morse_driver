@@ -12,7 +12,7 @@
 #include "debug.h"
 #include "bus.h"
 
-#define MORSE_USB_INTERRUPT_INTERVAL	8		/* High speed USB 8 * 125usec = 1msec */
+#define MORSE_USB_INTERRUPT_INTERVAL	4	/* High speed USB 2^(4-1) * 125usec = 1msec */
 #define USB_MAX_TRANSFER_SIZE		(16 * 1024)	/* Max bytes per USB read/write */
 #define MORSE_EP_INT_BUFFER_SIZE	8
 
@@ -47,7 +47,8 @@ struct morse_usb_endpoint {
 };
 
 enum morse_usb_flags {
-	MORSE_USB_FLAG_ATTACHED
+	MORSE_USB_FLAG_ATTACHED,
+	MORSE_USB_FLAG_SUSPENDED
 };
 
 struct morse_usb {
@@ -233,6 +234,14 @@ error_set_urb_null:
 	usb_free_urb(urb);
 out:
 	return ret;
+}
+
+static void morse_usb_int_stop(struct morse *mors)
+{
+	struct morse_usb *musb = (struct morse_usb *)mors->drv_priv;
+
+	usb_kill_urb(musb->endpoints[MORSE_EP_INT].urb);
+	cancel_work_sync(&mors->usb_irq_work);
 }
 
 static void morse_usb_cmd_callback(struct urb *urb)
@@ -541,10 +550,10 @@ static int morse_usb_reg32_write(struct morse *mors, u32 address, u32 val)
 {
 	int ret = 0;
 	struct morse_usb *musb = (struct morse_usb *)mors->drv_priv;
+	__le32 val_le = cpu_to_le32(val);
 
-	val = cpu_to_le32(val);
-	ret = morse_usb_mem_write(musb, address, (u8 *)&val, sizeof(val));
-	if (ret == sizeof(val))
+	ret = morse_usb_mem_write(musb, address, (u8 *)&val_le, sizeof(val_le));
+	if (ret == sizeof(val_le))
 		return 0;
 
 	MORSE_USB_ERR(mors, "%s failed %d\n", __func__, ret);
@@ -762,7 +771,7 @@ static int morse_usb_probe(struct usb_interface *interface, const struct usb_dev
 	ret = morse_chip_cfg_detect_and_init(mors, mors_chip_series);
 	if (ret < 0) {
 		MORSE_USB_ERR(mors, "morse_chip_cfg_detect_and_init failed: %d\n", ret);
-		goto err_mac;
+		goto err_ep;
 	}
 
 	mors->cfg->mm_ps_gpios_supported = false;
@@ -822,8 +831,11 @@ static int morse_usb_probe(struct usb_interface *interface, const struct usb_dev
 		ret = morse_firmware_parse_extended_host_table(mors);
 		if (ret) {
 			MORSE_USB_ERR(mors, "failed to parse extended host table: %d\n", ret);
-			goto err_buffs;
+			goto err_host_table;
 		}
+
+		INIT_WORK(&mors->usb_irq_work, morse_usb_irq_work);
+		morse_usb_enable_int(mors);
 
 		ret = morse_mac_register(mors);
 		if (ret) {
@@ -851,10 +863,8 @@ static int morse_usb_probe(struct usb_interface *interface, const struct usb_dev
 	}
 #endif
 
-	morse_usb_enable_int(mors);
-	INIT_WORK(&mors->usb_irq_work, morse_usb_irq_work);
-
 	/* USB requires remote wakeup functionality for suspend */
+	clear_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags);
 	musb->interface->needs_remote_wakeup = 1;
 	usb_enable_autosuspend(musb->udev);
 	pm_runtime_set_autosuspend_delay(&musb->udev->dev, PM_RUNTIME_AUTOSUSPEND_DELAY_MS);
@@ -872,6 +882,9 @@ err_uaccess:
 		morse_mac_unregister(mors);
 #endif
 err_mac:
+	if (morse_test_mode_is_interactive(test_mode))
+		morse_usb_int_stop(mors);
+err_host_table:
 	if (morse_test_mode_is_interactive(test_mode))
 		mors->cfg->ops->finish(mors);
 err_buffs:
@@ -925,14 +938,6 @@ static void morse_urb_cleanup(struct morse *mors)
 				  cmd_ep->buffer, cmd_ep->urb->transfer_dma);
 }
 
-static void morse_usb_int_stop(struct morse *mors)
-{
-	struct morse_usb *musb = (struct morse_usb *)mors->drv_priv;
-
-	usb_kill_urb(musb->endpoints[MORSE_EP_INT].urb);
-	cancel_work_sync(&mors->usb_irq_work);
-}
-
 static void morse_usb_disconnect(struct usb_interface *interface)
 {
 	struct morse *mors = usb_get_intfdata(interface);
@@ -947,6 +952,14 @@ static void morse_usb_disconnect(struct usb_interface *interface)
 	}
 
 	usb_disable_autosuspend(usb_get_dev(udev));
+
+	if (test_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags)) {
+		MORSE_USB_INFO(mors, "USB was suspended: release locks\n");
+		morse_usb_release_bus(mors);
+		mutex_unlock(&musb->lock);
+	}
+
+	clear_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags);
 
 #ifdef CONFIG_MORSE_USER_ACCESS
 	uaccess_device_unregister(mors);
@@ -984,6 +997,9 @@ static int morse_usb_suspend(struct usb_interface *intf, pm_message_t message)
 	struct morse_usb_endpoint *wr_ep = &musb->endpoints[MORSE_EP_MEM_WR];
 	struct morse_usb_endpoint *cmd_ep = &musb->endpoints[MORSE_EP_CMD];
 
+	if (!test_bit(MORSE_USB_FLAG_ATTACHED, &musb->flags))
+		return -ENODEV;
+
 	usb_kill_urb(int_ep->urb);
 	usb_kill_urb(rd_ep->urb);
 	usb_kill_urb(wr_ep->urb);
@@ -992,6 +1008,8 @@ static int morse_usb_suspend(struct usb_interface *intf, pm_message_t message)
 	/* Locking the bus. No USB communication after this point */
 	morse_usb_claim_bus(mors);
 	mutex_lock(&musb->lock);
+
+	set_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags);
 
 	MORSE_USB_INFO(mors, "USB suspend\n");
 
@@ -1014,6 +1032,8 @@ static int morse_usb_resume(struct usb_interface *intf)
 
 	morse_usb_release_bus(mors);
 	mutex_unlock(&musb->lock);
+
+	clear_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags);
 
 	MORSE_USB_INFO(mors, "USB resume\n");
 
@@ -1038,6 +1058,8 @@ static int morse_usb_reset_resume(struct usb_interface *intf)
 
 	morse_usb_release_bus(mors);
 	mutex_unlock(&musb->lock);
+
+	clear_bit(MORSE_USB_FLAG_SUSPENDED, &musb->flags);
 
 	return 0;
 }

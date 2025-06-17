@@ -32,6 +32,7 @@
  * @param evt lease update event
  * @return int 0 on success else error number
  */
-int morse_offload_dhcpc_set_address(struct morse *mors, struct morse_evt_dhcp_lease_update *evt);
+int morse_offload_dhcpc_set_address(struct morse *mors,
+				    struct morse_cmd_evt_dhcp_lease_update *evt);
 
 #endif /* !_MORSE_OFFLOAD_H_ */

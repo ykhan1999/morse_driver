@@ -14,14 +14,14 @@
 
 #define DHCP_OFFLOAD_MAX_CMD_SIZE			(256)
 
-static int append_ip_addr_to_string(char *str, int n, u32 ip)
+static int append_ip_addr_to_string(char *str, int n, __le32 ip)
 {
 	u8 *ptr = (u8 *)&ip;
 
 	return snprintf(str, n, "%d.%d.%d.%d ", ptr[0], ptr[1], ptr[2], ptr[3]);
 }
 
-int morse_offload_dhcpc_set_address(struct morse *mors, struct morse_evt_dhcp_lease_update *evt)
+int morse_offload_dhcpc_set_address(struct morse *mors, struct morse_cmd_evt_dhcp_lease_update *evt)
 {
 	int ret = 0;
 	static const char *const envp[] = { "HOME=/", NULL };

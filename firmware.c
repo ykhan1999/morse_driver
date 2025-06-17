@@ -67,14 +67,14 @@ static int get_file_header(const u8 *data, morse_elf_ehdr *ehdr)
 	if (p->e_ident[EI_DATA] != ELFDATA2LSB || p->e_ident[EI_CLASS] != ELFCLASS32)
 		return -1;
 
-	ehdr->e_phoff = le32_to_cpu(p->e_phoff);
-	ehdr->e_phentsize = le16_to_cpu(p->e_phentsize);
-	ehdr->e_phnum = le16_to_cpu(p->e_phnum);
-	ehdr->e_shoff = le32_to_cpu(p->e_shoff);
-	ehdr->e_shentsize = le16_to_cpu(p->e_shentsize);
-	ehdr->e_shnum = le16_to_cpu(p->e_shnum);
-	ehdr->e_shstrndx = le16_to_cpu(p->e_shstrndx);
-	ehdr->e_entry = le32_to_cpu(p->e_entry);
+	ehdr->e_phoff = le32_to_cpu((__force __le32)p->e_phoff);
+	ehdr->e_phentsize = le16_to_cpu((__force __le16)p->e_phentsize);
+	ehdr->e_phnum = le16_to_cpu((__force __le16)p->e_phnum);
+	ehdr->e_shoff = le32_to_cpu((__force __le32)p->e_shoff);
+	ehdr->e_shentsize = le16_to_cpu((__force __le16)p->e_shentsize);
+	ehdr->e_shnum = le16_to_cpu((__force __le16)p->e_shnum);
+	ehdr->e_shstrndx = le16_to_cpu((__force __le16)p->e_shstrndx);
+	ehdr->e_entry = le32_to_cpu((__force __le32)p->e_entry);
 
 	return 0;
 }
@@ -90,7 +90,7 @@ static void morse_parse_firmware_info(struct morse *mors, const u8 *data, int le
 		switch (le16_to_cpu(tlv->type)) {
 		case MORSE_FW_INFO_TLV_BCF_ADDR:
 			/* Put this in a get_unaligned just in case it's not aligned */
-			mors->bcf_address = le32_to_cpu(get_unaligned((u32 *)tlv->val));
+			mors->bcf_address = le32_to_cpu(get_unaligned((__force __le32 *)tlv->val));
 			break;
 		case MORSE_FW_INFO_TLV_COREDUMP_MEM_REGION:
 			morse_coredump_add_memory_region(mors,
@@ -118,12 +118,12 @@ static int get_section_header(const u8 *data, morse_elf_ehdr *ehdr, morse_elf_sh
 {
 	morse_elf_shdr *p = (morse_elf_shdr *)(data + ehdr->e_shoff + (i * ehdr->e_shentsize));
 
-	shdr->sh_name = le32_to_cpu(p->sh_name);
-	shdr->sh_type = le32_to_cpu(p->sh_type);
-	shdr->sh_offset = le32_to_cpu(p->sh_offset);
-	shdr->sh_addr = le32_to_cpu(p->sh_addr);
-	shdr->sh_size = le32_to_cpu(p->sh_size);
-	shdr->sh_flags = le32_to_cpu(p->sh_flags);
+	shdr->sh_name = le32_to_cpu((__force __le32)p->sh_name);
+	shdr->sh_type = le32_to_cpu((__force __le32)p->sh_type);
+	shdr->sh_offset = le32_to_cpu((__force __le32)p->sh_offset);
+	shdr->sh_addr = le32_to_cpu((__force __le32)p->sh_addr);
+	shdr->sh_size = le32_to_cpu((__force __le32)p->sh_size);
+	shdr->sh_flags = le32_to_cpu((__force __le32)p->sh_flags);
 
 	return 0;
 }
@@ -162,11 +162,11 @@ static int morse_firmware_load(struct morse *mors, const struct firmware *fw)
 		morse_elf_phdr *p =
 			(morse_elf_phdr *)(fw->data + ehdr.e_phoff + i * ehdr.e_phentsize);
 
-		phdr.p_type = le32_to_cpu(p->p_type);
-		phdr.p_offset = le32_to_cpu(p->p_offset);
-		phdr.p_paddr = le32_to_cpu(p->p_paddr);
-		phdr.p_filesz = le32_to_cpu(p->p_filesz);
-		phdr.p_memsz = le32_to_cpu(p->p_memsz);
+		phdr.p_type = le32_to_cpu((__force __le32)p->p_type);
+		phdr.p_offset = le32_to_cpu((__force __le32)p->p_offset);
+		phdr.p_paddr = le32_to_cpu((__force __le32)p->p_paddr);
+		phdr.p_filesz = le32_to_cpu((__force __le32)p->p_filesz);
+		phdr.p_memsz = le32_to_cpu((__force __le32)p->p_memsz);
 
 		/* In current design, the iflash/dflash are only used in self-hosted mode. For
 		 * hosted mode, if the sections are found in the combined image, driver
@@ -345,8 +345,6 @@ static void morse_firmware_clear_aon(struct morse *mors)
 	int idx;
 	u8 count = MORSE_REG_AON_COUNT(mors);
 	u32 address = MORSE_REG_AON_ADDR(mors);
-	u32 mask = MORSE_REG_AON_LATCH_MASK(mors);
-	u32 latch;
 
 	if (address)
 		for (idx = 0; idx < count; idx++, address += 4) {
@@ -358,17 +356,7 @@ static void morse_firmware_clear_aon(struct morse *mors)
 				morse_reg32_write(mors, address, 0x0);
 		}
 
-	address = MORSE_REG_AON_LATCH_ADDR(mors);
-	if (address) {
-		/* invoke AON latch procedure */
-		morse_reg32_read(mors, address, &latch);
-		morse_reg32_write(mors, address, latch & ~(mask));
-		mdelay(5);
-		morse_reg32_write(mors, address, latch | mask);
-		mdelay(5);
-		morse_reg32_write(mors, address, latch & ~(mask));
-		mdelay(5);
-	}
+	morse_hw_toggle_aon_latch(mors);
 }
 
 static int morse_firmware_trigger(struct morse *mors)
@@ -398,14 +386,14 @@ static int morse_firmware_trigger(struct morse *mors)
 static int morse_firmware_magic_verify(struct morse *mors)
 {
 	int ret = 0;
-	__le32 magic = ~MORSE_REG_HOST_MAGIC_VALUE(mors);	/* not the magic value */
+	int magic = ~MORSE_REG_HOST_MAGIC_VALUE(mors);	/* not the magic value */
 
 	morse_claim_bus(mors);
 
 	morse_reg32_read(mors, mors->cfg->host_table_ptr +
 			 offsetof(struct host_table, magic_number), &magic);
 
-	if (le32_to_cpu(magic) != MORSE_REG_HOST_MAGIC_VALUE(mors)) {
+	if (magic != MORSE_REG_HOST_MAGIC_VALUE(mors)) {
 		MORSE_ERR(mors, "FW magic mismatch 0x%08x:0x%08x\n",
 			  MORSE_REG_HOST_MAGIC_VALUE(mors), magic);
 		ret = -EIO;
@@ -418,14 +406,14 @@ static int morse_firmware_magic_verify(struct morse *mors)
 static int morse_firmware_get_fw_flags(struct morse *mors)
 {
 	int ret = 0;
-	__le32 fw_flags = 0;
+	int fw_flags = 0;
 
 	morse_claim_bus(mors);
 
 	ret = morse_reg32_read(mors, mors->cfg->host_table_ptr +
 			       offsetof(struct host_table, firmware_flags), &fw_flags);
 
-	mors->firmware_flags = le32_to_cpu(fw_flags);
+	mors->firmware_flags = fw_flags;
 
 	morse_release_bus(mors);
 
@@ -930,7 +918,7 @@ int morse_firmware_init(struct morse *mors, enum morse_config_test_mode test_mod
 		goto exit;
 	}
 
-	if (mors->cfg->get_encoded_country && enable_otp_check)	{
+	if (mors->cfg->get_encoded_country && enable_otp_check) {
 		ret = mors->cfg->get_encoded_country(mors);
 
 		if (ret == 0)
@@ -990,6 +978,9 @@ int morse_firmware_exec_ndr(struct morse *mors)
 {
 	int ret = 0;
 
+	if (mors->cfg->pre_firmware_ndr)
+		mors->cfg->pre_firmware_ndr(mors);
+
 	morse_claim_bus(mors);
 	morse_firmware_clear_aon(mors);
 	morse_release_bus(mors);
@@ -1007,6 +998,9 @@ int morse_firmware_exec_ndr(struct morse *mors)
 	ret = morse_firmware_parse_extended_host_table(mors);
 	if (ret)
 		MORSE_ERR(mors, "failed to parse extended host table: %d\n", ret);
+
+	if (mors->cfg->post_firmware_ndr)
+		mors->cfg->post_firmware_ndr(mors);
 
 	return ret;
 }
